@@ -12,7 +12,7 @@ export function scratch(): string {
 }
 export function cleanup() { for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true }); }
 
-export interface Login { access: string; refresh: string; uuid: string; plan?: string; expiresAt?: number }
+export interface Login { access: string; refresh: string; uuid: string; org?: string; plan?: string; expiresAt?: number }
 /** Invented credentials in the shape Claude Code writes. */
 export function creds(l: Login, extra: Record<string, unknown> = {}) {
   return { claudeAiOauth: { accessToken: l.access, refreshToken: l.refresh, expiresAt: l.expiresAt ?? Date.now() + 3_600_000, scopes: ["user:inference", "user:profile"], subscriptionType: l.plan ?? "max" }, ...extra };
@@ -35,7 +35,7 @@ export function makeHome(live?: Login): Home {
 }
 export function setLive(h: Home, l: Login) {
   writeFileSync(h.credsFile, JSON.stringify(creds(l, { mcpOAuth: { keep: "me" } })), { mode: 0o600 });
-  writeFileSync(h.claudeJson, JSON.stringify({ numStartups: 7, oauthAccount: { accountUuid: l.uuid, displayName: "Fixture" }, projects: { "/orbit": {} } }), { mode: 0o600 });
+  writeFileSync(h.claudeJson, JSON.stringify({ numStartups: 7, oauthAccount: { accountUuid: l.uuid, ...(l.org ? { organizationUuid: l.org } : {}), displayName: "Fixture" }, projects: { "/orbit": {} } }), { mode: 0o600 });
 }
 export const readJson = (f: string) => JSON.parse(readFileSync(f, "utf8"));
 

@@ -145,6 +145,82 @@ describe("use: RACE, a refresh lands while the switch runs", () => {
   });
 });
 
+describe("identity: the token and the account key must agree", () => {
+  const writeCreds = (h: Home, refresh: string) => writeFileSync(h.credsFile, JSON.stringify({ claudeAiOauth: { accessToken: `${refresh}-acc`, refreshToken: refresh, expiresAt: Date.now() + 3e6 } }));
+  const keyOf = (h: Home, uuid: string, extra: Record<string, unknown> = {}) => writeFileSync(h.claudeJson, JSON.stringify({ oauthAccount: { accountUuid: uuid, ...extra } }));
+
+  // Reached by a crash between the two writes, or by Claude Code rewriting .claude.json from memory: home's token next to work's account key. Matching by account alone filed home's token into work's slot.
+  test("home's token with work's account key is refused, and nothing is filed anywhere", async () => {
+    const { h, acc, store } = await twoSaved();
+    keyOf(h, "uuid-a");
+    const before = treeHash(h.home, h.data);
+    await expect(acc.use("work")).rejects.toThrow("different logins");
+    await expect(acc.saveCurrent("copy")).rejects.toThrow("different logins");
+    await expect(acc.remove("home")).rejects.toThrow("different logins");
+    expect(treeHash(h.home, h.data)).toBe(before);
+    expect((await slot(store, "work")).oauth.refreshToken).toBe("fixture-ra");
+    expect((await acc.body()).accounts.map((a) => a.active)).toEqual([false, false]);
+  });
+
+  test("a token saved without an account key next to another account's key is refused", async () => {
+    const h = makeHome(A);
+    const { acc } = await open(h);
+    await acc.saveCurrent("work");
+    writeCreds(h, "fixture-rb");
+    writeFileSync(h.claudeJson, JSON.stringify({})); // signed in with no account key written
+    await acc.saveCurrent("home");
+    keyOf(h, "uuid-a");
+    await expect(acc.use("work")).rejects.toThrow("different logins");
+  });
+
+  test("an account key nobody saved next to a saved token is refused too", async () => {
+    const { h, acc } = await twoSaved();
+    keyOf(h, "uuid-c");
+    await expect(acc.use("work")).rejects.toThrow("different logins");
+  });
+
+  test("a rotated token under the right account key is still the right account", async () => {
+    const { h, acc, store } = await twoSaved();
+    rotate(h, B, 4);
+    await acc.use("work");
+    expect((await slot(store, "home")).oauth.refreshToken).toBe("fixture-rb-r4");
+  });
+
+  test("a personal plan and a team seat of one person are two accounts", async () => {
+    const h = makeHome({ ...A, org: "org-personal" });
+    const { acc } = await open(h);
+    await acc.saveCurrent("personal");
+    setLive(h, { ...A, refresh: "fixture-ra-team", access: "fixture-a-team", org: "org-team", plan: "team" });
+    await acc.saveCurrent("team");
+    setLive(h, { ...A, access: "fixture-a-team-r1", refresh: "fixture-ra-team-r1", org: "org-team", plan: "team" });
+    expect((await acc.body()).accounts.map((a) => [a.id, a.active])).toEqual([["personal", false], ["team", true]]);
+  });
+
+  test("the slot keeps the login it replaced, and it can be put back", async () => {
+    const { h, acc, store } = await twoSaved();
+    rotate(h, B, 1);
+    await acc.use("work"); // home's slot: r1, replacing the saved one
+    const b = await slot(store, "home");
+    expect(b.oauth.refreshToken).toBe("fixture-rb-r1");
+    expect(b.prev?.oauth.refreshToken).toBe("fixture-rb");
+    expect(b.prev?.prev).toBeUndefined();
+    await acc.restorePrevious("home");
+    const back = await slot(store, "home");
+    expect(back.oauth.refreshToken).toBe("fixture-rb");
+    expect(back.prev?.oauth.refreshToken).toBe("fixture-rb-r1");
+  });
+
+  // Without an account uuid the refresh token is all there is to match on, and a rotation breaks it. The sentence has to say how out.
+  test("a saved login with no account key that has rotated since: refused, and the way out is named", async () => {
+    const h = makeHome(A);
+    writeFileSync(h.claudeJson, JSON.stringify({}));
+    const { acc } = await open(h);
+    await acc.saveCurrent("work");
+    writeCreds(h, "fixture-ra-rotated");
+    await expect(acc.use("work")).rejects.toThrow("remove that account");
+  });
+});
+
 describe("a switch cut short, and a file caught half written", () => {
   const tear = (h: Home) => writeFileSync(h.credsFile, '{"claudeAiOauth":{"accessTok');
   const setMeta = (h: Home, f: (m: any) => void) => { const file = join(h.data, "accounts.json"); const m = JSON.parse(readFileSync(file, "utf8")); f(m); writeFileSync(file, JSON.stringify(m)); };

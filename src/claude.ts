@@ -7,7 +7,11 @@ type Rec = Record<string, unknown>;
 const isRec = (v: unknown): v is Rec => !!v && typeof v === "object" && !Array.isArray(v);
 
 /** Everything that makes a Claude Code login "this account": the token block and the account key. In memory or in a secret store only. */
-export interface Bundle { oauth: Rec; account: Rec | null }
+export interface Bundle {
+  oauth: Rec; account: Rec | null;
+  /** The login this slot held before the last save, one step back and no further: a mis-filed token can be put back. */
+  prev?: Bundle;
+}
 export interface ClaudePaths { creds: string; json: string }
 
 export function claudePaths(env: Env): ClaudePaths {
@@ -55,7 +59,8 @@ function copyLive(p: ClaudePaths, dir: string) {
  * every other key in both files is kept as it was read. The files are written
  * where they stand (the box binds the two files, not their folder, so there
  * is no rename and no temp file), which a crash can cut short: so the content
- * they had is copied to `backupDir` first, and `recoverLive` puts it back. If
+ * they had is copied to `backupDir` first (and the new pair again once both are
+ * whole), and `recoverLive` puts a torn file back from it. If
  * the second file fails the first is put back, so the pair never ends up
  * from two logins.
  */
@@ -75,6 +80,8 @@ export function writeLive(p: ClaudePaths, b: Bundle, o: WriteOpts) {
     if (credsText !== null) overwriteJsonInPlace(p.creds, credsText); else unlinkSync(p.creds);
     throw e;
   }
+  // Whole again: the copy now holds this pair, so a file torn LATER is restored to the login in use and not to the one before the switch (that would pair it with the other file's new account key).
+  copyLive(p, o.backupDir);
 }
 
 /** A file cut off mid-write: not JSON, or a login block that lost its refresh token. A signed-out file (no login block) is whole. */
@@ -106,16 +113,32 @@ export async function recoverLive(p: ClaudePaths, dir: string, settleMs = 150): 
   return out;
 }
 
-/** Same login: the account uuid when both have one, else the refresh token. */
-export function sameLogin(a: Bundle, b: Bundle): boolean {
+/** Same refresh token: the exact chain, nothing inferred. */
+export const sameToken = (a: Bundle, b: Bundle) => typeof a.oauth.refreshToken === "string" && a.oauth.refreshToken === b.oauth.refreshToken;
+
+/** Both sides name an account and it is not the same one. */
+export function otherAccount(a: Bundle, b: Bundle): boolean {
   const ua = a.account?.accountUuid, ub = b.account?.accountUuid;
-  if (typeof ua === "string" && typeof ub === "string") return ua === ub;
-  return typeof a.oauth.refreshToken === "string" && a.oauth.refreshToken === b.oauth.refreshToken;
+  return typeof ua === "string" && typeof ub === "string" && ua !== ub;
+}
+
+/**
+ * Same login: the account uuid and, when both sides say one, the organisation
+ * (a personal plan and a team seat share the uuid); else the refresh token.
+ */
+export function sameLogin(a: Bundle, b: Bundle): boolean {
+  if (typeof a.account?.accountUuid === "string" && typeof b.account?.accountUuid === "string") {
+    if (otherAccount(a, b)) return false;
+    const oa = a.account.organizationUuid, ob = b.account.organizationUuid;
+    return !(typeof oa === "string" && typeof ob === "string" && oa !== ob);
+  }
+  return sameToken(a, b);
 }
 
 export const serialize = (b: Bundle) => JSON.stringify({ v: 1, ...b });
 export function parseBundle(text: string): Bundle {
   const j: unknown = JSON.parse(text);
   if (!isRec(j) || j.v !== 1 || !isRec(j.oauth)) throw new Error("stored login is not readable");
-  return { oauth: j.oauth, account: isRec(j.account) ? j.account : null };
+  const p = j.prev;
+  return { oauth: j.oauth, account: isRec(j.account) ? j.account : null, ...(isRec(p) && isRec(p.oauth) ? { prev: { oauth: p.oauth, account: isRec(p.account) ? p.account : null } } : {}) };
 }

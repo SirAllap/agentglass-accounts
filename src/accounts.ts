@@ -3,7 +3,7 @@ import { join, resolve, sep } from "node:path";
 import { withLock } from "./lock.ts";
 import { SecretStore, StoreUnavailable, type Storage } from "./store.ts";
 import { atomicWrite } from "./fsutil.ts";
-import { claudePaths, readLive, writeLive, recoverLive, LiveMoved, sameLogin, serialize, parseBundle, type Bundle, type ClaudePaths } from "./claude.ts";
+import { claudePaths, readLive, writeLive, recoverLive, LiveMoved, sameLogin, sameToken, otherAccount, serialize, parseBundle, type Bundle, type ClaudePaths } from "./claude.ts";
 import { swapkinPresent, mirror, type Env } from "./swapkin.ts";
 
 /** An expected "no": its message is a sentence meant for the person, and never carries a token. */
@@ -134,17 +134,47 @@ export class Accounts {
     if (t === null) return null;
     try { return parseBundle(t); } catch { return null; }
   }
-  /** Which saved account the live login is, matched in memory only. */
+  /**
+   * Which saved account the live login is, matched in memory only. The token
+   * comes first: an exact refresh-token match is the account whatever the
+   * account key says, and a key that names someone else means the two files
+   * were written by two programs, so nothing is filed anywhere.
+   */
   private async identify(meta: Meta, live: Bundle | null): Promise<string | null> {
     if (!live) return null;
-    for (const a of meta.accounts) { const b = await this.bundleOf(a.id); if (b && sameLogin(live, b)) return a.id; }
-    return null;
+    let byToken: [string, Bundle] | null = null, byAccount: string | null = null;
+    for (const a of meta.accounts) {
+      const b = await this.bundleOf(a.id);
+      if (!b) continue;
+      if (!byToken && sameToken(live, b)) byToken = [a.id, b];
+      if (!byAccount && sameLogin(live, b)) byAccount = a.id;
+    }
+    if (byToken) {
+      if (otherAccount(live, byToken[1]) || (byAccount && byAccount !== byToken[0]))
+        throw new Refused("Claude Code's two login files belong to different logins (two programs probably wrote them at once), so nothing was changed. Sign in to Claude Code again, then save or switch.");
+      return byToken[0];
+    }
+    return byAccount;
   }
   private async put(meta: Meta, id: string, b: Bundle) {
-    const kind = await this.store.set(id, serialize(b));
+    const old = await this.bundleOf(id);
+    const next: Bundle = old && !sameToken(old, b) ? { oauth: b.oauth, account: b.account, prev: { oauth: old.oauth, account: old.account } } : { oauth: b.oauth, account: b.account, ...(old?.prev ? { prev: old.prev } : {}) };
+    const kind = await this.store.set(id, serialize(next));
     const a = meta.accounts.find((x) => x.id === id);
     if (a) a.storage = kind;
     return kind;
+  }
+  /** Puts back the login a slot held before its last save (one step), keeping the current one as the new previous. */
+  async restorePrevious(id: string): Promise<void> {
+    this.guard();
+    return this.locked(async () => {
+      this.guard();
+      const meta = this.loadMeta();
+      const b = await this.bundleOf(id);
+      if (!meta.accounts.some((a) => a.id === id) || !b?.prev) throw new Refused("There is no earlier login kept for that account.");
+      await this.put(meta, id, b.prev);
+      this.saveMeta(meta);
+    });
   }
 
   // ---- what the app is told ----
@@ -199,7 +229,7 @@ export class Accounts {
       await this.mend(meta);
       const live = this.liveForWrite();
       const outId = await this.identify(meta, live);
-      if (live && !outId) throw new Refused("The login Claude Code is using now is not one of your saved accounts, so switching would lose it. Save it as an account first.");
+      if (live && !outId) throw new Refused("The login Claude Code is using now is not one of your saved accounts, so switching would lose it. Save it as an account first (if you saved it before and Claude Code has signed in again, remove that account first).");
       let saved: Bundle | null = live;
       if (live && outId) {
         let s: Bundle = live;

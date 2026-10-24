@@ -82,6 +82,19 @@ describe("claude adapter", () => {
     expect(sameLogin({ oauth: { refreshToken: "r1" }, account: null }, { oauth: { refreshToken: "r2" }, account: null })).toBe(false);
   });
 
+  // One person with a personal plan and a team seat has one accountUuid and two organisations.
+  test("same login: one account uuid in two organisations is two logins", () => {
+    const mk = (org: string | undefined, r: string) => ({ oauth: { refreshToken: r }, account: { accountUuid: "u", ...(org ? { organizationUuid: org } : {}) } });
+    expect(sameLogin(mk("org-1", "r1"), mk("org-2", "r1"))).toBe(false);
+    expect(sameLogin(mk("org-1", "r1"), mk("org-1", "rotated"))).toBe(true);
+    expect(sameLogin(mk("org-1", "r1"), mk(undefined, "r2"))).toBe(true); // one side does not say: the uuid decides
+  });
+
+  test("a stored bundle keeps the previous login, once", () => {
+    const b = { oauth: { refreshToken: "r2" }, account: { accountUuid: "u" }, prev: { oauth: { refreshToken: "r1" }, account: { accountUuid: "u" } } };
+    expect(parseBundle(serialize(b))).toEqual(b);
+  });
+
   test("a stored bundle round-trips and an alien string is refused", () => {
     const b = { oauth: { refreshToken: "r" }, account: { accountUuid: "u" } };
     expect(parseBundle(serialize(b))).toEqual(b);
@@ -92,13 +105,17 @@ describe("claude adapter", () => {
 const bundleB = () => ({ oauth: readLive(claudePaths(makeHome(B).env))!.oauth, account: { accountUuid: "uuid-b" } });
 
 describe("a copy to restore from, and a check before the write", () => {
-  test("the live content is copied to the backup folder (0600) before it is replaced", () => {
+  test("the live content is copied before it is replaced, and the new pair once both files are whole", () => {
     const h = makeHome(A);
     const bk = join(scratch(), "bk");
     const before = [readFileSync(h.credsFile, "utf8"), readFileSync(h.claudeJson, "utf8")];
-    writeLive(claudePaths(h.env), bundleB(), { backupDir: bk });
-    expect(readFileSync(join(bk, "credentials.json"), "utf8")).toBe(before[0]);
-    expect(readFileSync(join(bk, "claude.json"), "utf8")).toBe(before[1]);
+    const snaps: string[] = [];
+    const { fsync } = io;
+    io.fsync = (fd) => { try { snaps.push(readFileSync(join(bk, "credentials.json"), "utf8")); } catch { /* not there yet */ } fsync(fd); };
+    try { writeLive(claudePaths(h.env), bundleB(), { backupDir: bk }); } finally { io.fsync = fsync; }
+    expect(snaps).toContain(before[0]); // while the live files were being replaced, the copy held what they had
+    expect(readFileSync(join(bk, "credentials.json"), "utf8")).toBe(readFileSync(h.credsFile, "utf8"));
+    expect(readFileSync(join(bk, "claude.json"), "utf8")).toBe(readFileSync(h.claudeJson, "utf8"));
     expect(statSync(join(bk, "credentials.json")).mode & 0o777).toBe(0o600);
     expect(statSync(bk).mode & 0o777).toBe(0o700);
   });
@@ -118,8 +135,8 @@ describe("a copy to restore from, and a check before the write", () => {
     const h = makeHome(A);
     const bk = join(scratch(), "bk");
     const p = claudePaths(h.env);
-    const good = [readFileSync(h.credsFile, "utf8"), readFileSync(h.claudeJson, "utf8")];
     writeLive(p, bundleB(), { backupDir: bk });
+    const good = [readFileSync(h.credsFile, "utf8"), readFileSync(h.claudeJson, "utf8")];
     writeFileSync(h.credsFile, '{"claudeAiOauth":{"accessTok');
     writeFileSync(h.claudeJson, '{"oauthAcc');
     expect((await recoverLive(p, bk, 0)).sort()).toEqual(["claude.json", "credentials.json"]);
