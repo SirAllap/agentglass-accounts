@@ -11,6 +11,8 @@ export interface RunOptions {
   waitMs?: number;
   /** First backoff after a failed poll, ms; doubles to 30 s. */
   retryMs?: number;
+  /** Failed polls in a row after which the run ends: a host that is gone must not leave this process polling for ever. */
+  maxFailures?: number;
   /** Delay before the first probe pass, then the period (jittered +-25%). */
   firstProbeMs?: number;
   probeMs?: number;
@@ -120,6 +122,7 @@ export async function run(env: Env, o: RunOptions = {}): Promise<void> {
         if (e instanceof Gone) return;
         if (signal.aborted) return;
         log(`poll failed: ${why(e)}`);
+        if (failures + 1 >= (o.maxFailures ?? 8)) return;
         await sleep(Math.min((o.retryMs ?? 2_000) * 2 ** failures++, 30_000));
       }
     }

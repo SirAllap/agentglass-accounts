@@ -123,6 +123,13 @@ describe("the loop stays up", () => {
     await t.stop();
   });
 
+  test("a host that is gone ends the run instead of polling for ever", async () => {
+    const t = await boot({ run: { maxFailures: 3 } });
+    await until(() => t.host.accounts.length > 0);
+    t.host.stop();
+    await Promise.race([t.done, Bun.sleep(3000).then(() => { throw new Error("run did not end"); })]);
+  });
+
   test.each([401, 403])("a %i from the host ends the run", async (code) => {
     const t = await boot();
     await until(() => t.host.accounts.length > 0);
