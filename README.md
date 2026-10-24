@@ -17,7 +17,7 @@ account's. Read the grants below before enabling it.
 | `network: internet` | Checks the usage of accounts you are not using, and renews their tokens, against Anthropic. |
 | `read`/`write` `~/.claude` | The live `.credentials.json` is there. A switch rewrites it (temp file in the same folder, then rename). |
 | `read`/`write` `~/.claude.json` | Holds `oauthAccount`, the other half of "who is logged in". Only that key is replaced; the rest of the file is kept. |
-| `programs: claude, bun` | `claude` is used only to tell you the command for adding an account; the plugin runs on `bun`. |
+| `programs: bun` | The plugin runs on `bun`. In the box, a `bun` that lives under your home folder (`~/.bun`, a version manager) is only visible through this grant; one under `/usr` needs none. `claude` is not granted: the plugin never runs it, it only prints the command for you to run. |
 
 No grant covers the whole home folder, `~/.config/agentglass`, or the keyring
 folders: the sandbox refuses those for every plugin.
@@ -37,6 +37,16 @@ If `swapkin` is on PATH or its data folder exists, this plugin does nothing that
 writes: no switch, add, remove or probe. It shows what Swapkin reports, read
 only, and tells the app to show "Managed by Swapkin". Presence is checked at
 start and again right before every write.
+
+Inside the box this process cannot see Swapkin (its PATH entry and folder are
+not mounted; measured with a stub `swapkin` on the app's PATH, the plugin kept
+switching). So every list carries `deferTo: "swapkin"`, which the app drops
+unless it finds Swapkin itself, and the app's answer is read back from
+`GET /usage/accounts` after each post, before each press that writes, and every
+five minutes. Between two of those, Swapkin installed a moment ago is not
+known to either side: the press still reaches the plugin, which asks again and
+refuses. The mirror of Swapkin's own accounts (`swapkin providers --json`)
+only works unboxed; in the box the plugin shows its own list, read only.
 
 ## How a switch stays safe
 
@@ -77,15 +87,31 @@ Given by the host: `PATH`, `HOME`, `AGENTGLASS_READ_TOKEN`, `AGENTGLASS_URL`,
   would have to sign in again. Close Claude Code sessions you are not using.
 - **`~/.claude.json` is read, changed and replaced as a whole.** Claude Code
   writes it too; a write of its own between our read and rename is lost.
-  When the file is a bind mount inside the box (rename refused with EBUSY or
-  EXDEV) it is overwritten in place instead, which is not atomic.
+  In the box that file is a bind mount, so the rename is refused (EBUSY) and
+  it is overwritten **in place** instead (measured: same inode before and
+  after), which is not atomic: a crash in the middle can leave it half
+  written. `.credentials.json` sits in a granted folder and is renamed
+  atomically. The grant is the file, not its folder, because the app refuses
+  to mount the folder `~` itself.
+- **Secrets are in a file.** In the box there is no keyring (the app gives
+  plugins none and the session bus is out of reach), so each account's tokens
+  are a `0600` file in the plugin's data folder: anything running as you can
+  read it, and a plugin that runs unboxed can too. The popover says "stored in
+  a file".
 - **Matching the live login** needs `oauthAccount.accountUuid` (Claude Code
   always writes it) or an unrotated refresh token.
 - A probe holds the lock while it renews a token (up to 8 s), so a switch can
   wait that long.
 - Only the 5 hour and 7 day windows are read, not per-model limits.
-- The refresh endpoint and client id are Claude Code's; they were not checked
-  against a live server here (`ACCOUNTS_TOKEN_URL` overrides the URL).
+- **Unverified against the real service:** the token refresh endpoint and the
+  client id are written from memory of Claude Code and were only ever answered
+  by a fake server on localhost. The usage endpoint and its response shape come
+  from the app's own reader. Until someone checks the refresh against the real
+  service, a probe of an account you are not using may fail (it backs off and
+  keeps the last reading); `ACCOUNTS_TOKEN_URL` overrides the URL.
+- The entrypoint starts `bun` from `/tmp`, not from the install folder: in the
+  box `bun` must open the parents of its working directory and cannot
+  (`CouldntReadCurrentDirectory`).
 - Swapkin's `providers --json` shape was not measured; a mismatch falls back to
   the plugin's own list, read only.
 - A keyring entry that cannot be deleted when you remove an account stays in the
