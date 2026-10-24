@@ -1,7 +1,7 @@
 import { readFileSync, mkdirSync, rmSync, chmodSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { withLock } from "./lock.ts";
-import { SecretStore, type Storage } from "./store.ts";
+import { SecretStore, StoreUnavailable, type Storage } from "./store.ts";
 import { atomicWrite } from "./fsutil.ts";
 import { claudePaths, readLive, writeLive, sameLogin, serialize, parseBundle, type Bundle, type ClaudePaths } from "./claude.ts";
 import { swapkinPresent, mirror, type Env } from "./swapkin.ts";
@@ -94,7 +94,8 @@ export class Accounts {
 
   // ---- identity ----
   private async bundleOf(id: string): Promise<Bundle | null> {
-    const t = await this.store.get(id);
+    let t: string | null;
+    try { t = await this.store.get(id); } catch (e) { throw e instanceof StoreUnavailable ? new Refused(e.message) : e; }
     if (t === null) return null;
     try { return parseBundle(t); } catch { return null; }
   }
@@ -115,7 +116,8 @@ export class Accounts {
   async body(): Promise<Body> {
     if (this.deferred()) return this.deferredBody();
     const meta = this.loadMeta();
-    const active = await this.identify(meta, readLive(this.paths));
+    // A keyring that does not answer cannot say which account is live: say none rather than guess.
+    const active = await this.identify(meta, readLive(this.paths)).catch((e) => { if (e instanceof Refused) return null; throw e; });
     return { provider: "anthropic", accounts: meta.accounts.map((a, i) => ({
       id: a.id, label: safeText(a.label, 32) || `Account ${i + 1}`, plan: safeText(a.plan, 24), colour: COLOURS.includes(a.colour) ? a.colour : "neutral",
       active: a.id === active, storage: a.storage,

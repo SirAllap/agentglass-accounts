@@ -1,16 +1,16 @@
 import { describe, expect, test, afterAll } from "bun:test";
 import { statSync, existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { SecretStore, probeKeyring, type Keyring } from "../src/store.ts";
+import { SecretStore, StoreUnavailable, probeKeyring, type Keyring } from "../src/store.ts";
 import { scratch, cleanup } from "./helpers.ts";
 
 afterAll(cleanup);
 
 /** An in-memory keyring with switches, so each failure the real one has can be asked for. */
-function fake(mode: "ok" | "hang" | "throw" | "dies-later" = "ok"): Keyring & { m: Map<string, string>; calls: number } {
-  const k = { m: new Map<string, string>(), calls: 0,
+function fake(mode: "ok" | "hang" | "throw" | "dies-later" | "get-dies" = "ok"): Keyring & { m: Map<string, string>; calls: number; gets: number } {
+  const k = { m: new Map<string, string>(), calls: 0, gets: 0,
     async set(n: string, v: string) { k.calls++; if (mode === "hang") return new Promise<void>(() => {}); if (mode === "throw" || (mode === "dies-later" && k.calls > 1)) throw new Error("no bus"); k.m.set(n, v); },
-    async get(n: string) { if (mode === "hang") return new Promise<string>(() => {}); return k.m.get(n) ?? null; },
+    async get(n: string) { if (mode === "get-dies" && ++k.gets > 1) throw new Error("no bus"); if (mode === "hang") return new Promise<string>(() => {}); return k.m.get(n) ?? null; },
     async delete(n: string) { return k.m.delete(n); } };
   return k;
 }
@@ -54,6 +54,15 @@ describe("keyring choice", () => {
     expect(await s.kindOf("work")).toBe("keyring");
     await s.delete("work");
     expect(k.m.has("anthropic/work")).toBe(false);
+  });
+  // "The keyring did not answer" and "there is nothing under that name" were both null, so a login already saved looked unsaved and was saved a second time.
+  test("a keyring that stops answering is an error, not an absent account", async () => {
+    const k = fake("get-dies");
+    const s = await SecretStore.open(scratch(), { keyring: k, probeMs: 500 });
+    expect(s.backend).toBe("keyring");
+    await s.set("work", "secret-1");
+    await expect(s.get("work")).rejects.toBeInstanceOf(StoreUnavailable);
+    expect(await fake("ok").get("never-saved")).toBeNull(); // a keyring that answers "nothing" is still null
   });
   test("a keyring that hangs falls back to the file within the probe time", async () => {
     const t = Date.now();

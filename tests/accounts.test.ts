@@ -2,7 +2,7 @@ import { describe, expect, test, afterAll } from "bun:test";
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Accounts, Refused, type Hooks } from "../src/accounts.ts";
-import { SecretStore } from "../src/store.ts";
+import { SecretStore, type Keyring } from "../src/store.ts";
 import { parseBundle } from "../src/claude.ts";
 import { makeHome, setLive, readJson, cleanup, treeHash, stub, coreProblem, type Home, type Login } from "./helpers.ts";
 import { fakeServer } from "./fakeServer.ts";
@@ -141,6 +141,37 @@ describe("use: RACE, a refresh lands while the switch runs", () => {
     const acc = new Accounts(ctx.env, { store, hooks: { afterSave: () => rotate(h, B, ++k) } });
     await expect(acc.use("work")).rejects.toThrow("kept changing");
     expect(live(h).startsWith("fixture-rb")).toBe(true);
+  });
+});
+
+describe("a keyring that stops answering", () => {
+  /** Answers the probe and the first save, then goes silent on reads, like a locked keyring. */
+  function flaky() {
+    const m = new Map<string, string>();
+    const k: Keyring & { down: boolean } = { down: false,
+      async set(n, v) { m.set(n, v); },
+      async get(n) { if (k.down && !n.startsWith("probe/")) throw new Error("no bus"); return m.get(n) ?? null; },
+      async delete(n) { return m.delete(n); } };
+    return k;
+  }
+  test("saving the login again is refused, not saved as a second account", async () => {
+    const h = makeHome(A);
+    const k = flaky();
+    const acc = new Accounts(h.env, { store: await SecretStore.open(h.data, { keyring: k }) });
+    await acc.saveCurrent("work");
+    k.down = true;
+    await expect(acc.saveCurrent("again")).rejects.toThrow("keyring did not answer");
+    expect(JSON.parse(readFileSync(join(h.data, "accounts.json"), "utf8")).accounts.length).toBe(1);
+    await expect(acc.use("work")).rejects.toBeInstanceOf(Refused);
+  });
+  test("the list still posts, with nobody marked in use", async () => {
+    const h = makeHome(A);
+    const k = flaky();
+    const acc = new Accounts(h.env, { store: await SecretStore.open(h.data, { keyring: k }) });
+    await acc.saveCurrent("work");
+    k.down = true;
+    const b = await acc.body();
+    expect(b.accounts.map((a) => [a.id, a.active])).toEqual([["work", false]]);
   });
 });
 

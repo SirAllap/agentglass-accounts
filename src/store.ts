@@ -6,6 +6,9 @@ export type Storage = "keyring" | "file";
 export const ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const SERVICE = "agentglass-accounts";
 
+/** The keyring did not answer, so nothing can be said about what it holds. Not the same as "no such account". */
+export class StoreUnavailable extends Error {}
+
 export interface Keyring {
   set(name: string, value: string): Promise<void>;
   get(name: string): Promise<string | null>;
@@ -78,7 +81,7 @@ export class SecretStore {
     const f = this.file(id);
     if (existsSync(f)) return readFileSync(f, "utf8");
     if (!this.keyring) return null;
-    try { return await timeout(this.keyring.get(this.key(id)), 3000); } catch { return null; }
+    try { return await timeout(this.keyring.get(this.key(id)), 3000); } catch { throw new StoreUnavailable("The keyring did not answer, so nothing was changed. Try again in a moment."); }
   }
 
   async kindOf(id: string): Promise<Storage | null> {
