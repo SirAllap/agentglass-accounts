@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { atomicWrite } from "./fsutil.ts";
+import { overwriteJsonInPlace } from "./fsutil.ts";
 import type { Env } from "./swapkin.ts";
 
 type Rec = Record<string, unknown>;
@@ -43,11 +43,11 @@ export function writeLive(p: ClaudePaths, b: Bundle) {
   const nextCreds = { ...creds, claudeAiOauth: b.oauth };
   const { oauthAccount: _old, ...rest } = json;
   const nextJson = b.account ? { ...rest, oauthAccount: b.account } : rest;
-  atomicWrite(p.creds, JSON.stringify(nextCreds));
+  overwriteJsonInPlace(p.creds, JSON.stringify(nextCreds));
   try {
-    atomicWrite(p.json, JSON.stringify(nextJson, null, 2));
+    overwriteJsonInPlace(p.json, JSON.stringify(nextJson, null, 2));
   } catch (e) {
-    if (credsText !== null) atomicWrite(p.creds, credsText); else unlinkSync(p.creds);
+    if (credsText !== null) overwriteJsonInPlace(p.creds, credsText); else unlinkSync(p.creds);
     throw e;
   }
 }

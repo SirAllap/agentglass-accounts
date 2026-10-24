@@ -1,8 +1,8 @@
 import { describe, expect, test, afterAll } from "bun:test";
-import { statSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
+import { statSync, lstatSync, readdirSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { claudePaths, readLive, writeLive, sameLogin, serialize, parseBundle } from "../src/claude.ts";
-import { atomicWrite, io } from "../src/fsutil.ts";
+import { atomicWrite, overwriteJsonInPlace, io } from "../src/fsutil.ts";
 import { makeHome, setLive, readJson, cleanup, scratch } from "./helpers.ts";
 
 afterAll(cleanup);
@@ -43,6 +43,21 @@ describe("claude adapter", () => {
     expect(readdirSync(h.home).sort()).toEqual([".claude", ".claude.json"]);
   });
 
+  // Only the two files are bind-mounted into the box, never their folder: a rename (which needs the folder) is refused there, and so is a temp file next to them.
+  test("both live files are written where they stand: same inodes, a symlink stays a link, no temp file", () => {
+    const h = makeHome(A);
+    const target = join(h.root, "dotfiles.json");
+    require("node:fs").renameSync(h.claudeJson, target);
+    symlinkSync(target, h.claudeJson);
+    const ino = [statSync(h.credsFile).ino, statSync(target).ino];
+    const b = { oauth: readLive(claudePaths(makeHome(B).env))!.oauth, account: { accountUuid: "uuid-b" } };
+    writeLive(claudePaths(h.env), b);
+    expect([statSync(h.credsFile).ino, statSync(target).ino]).toEqual(ino);
+    expect(lstatSync(h.claudeJson).isSymbolicLink()).toBe(true);
+    expect(readJson(target).oauthAccount).toEqual({ accountUuid: "uuid-b" });
+    expect(readdirSync(h.claudeDir)).toEqual([".credentials.json"]);
+  });
+
   test("a second file that cannot be written puts the first back", () => {
     const h = makeHome(A);
     const p = { ...claudePaths(h.env), json: join(h.home, "no-such-dir-is-a-file", "x") };
@@ -75,21 +90,79 @@ describe("claude adapter", () => {
 });
 
 describe("atomic write", () => {
-  test("when rename is refused (a bind-mounted file in a box) it overwrites in place", () => {
+  test("temp in the same folder, fsynced before the rename, nothing left behind", () => {
+    const d = scratch();
+    const f = join(d, "slot.json");
+    const order: string[] = [];
+    const { rename, fsync } = io;
+    io.rename = (a, b) => { order.push("rename"); rename(a, b); };
+    io.fsync = (fd) => { order.push("fsync"); fsync(fd); };
+    try { atomicWrite(f, "new"); } finally { Object.assign(io, { rename, fsync }); }
+    expect(order).toEqual(["fsync", "rename"]);
+    expect(readFileSync(f, "utf8")).toBe("new");
+    expect(statSync(f).mode & 0o777).toBe(0o600);
+    expect(readdirSync(d)).toEqual(["slot.json"]);
+  });
+  test("a rename that fails leaves the old file and no temp", () => {
+    const d = scratch();
+    const f = join(d, "slot.json");
+    writeFileSync(f, "old");
+    const { rename } = io;
+    io.rename = () => { throw Object.assign(new Error("busy"), { code: "EBUSY" }); };
+    try { expect(() => atomicWrite(f, "new")).toThrow(); } finally { io.rename = rename; }
+    expect(readFileSync(f, "utf8")).toBe("old");
+    expect(readdirSync(d)).toEqual(["slot.json"]);
+  });
+});
+
+describe("overwrite in place", () => {
+  const doc = (n: number) => JSON.stringify({ k: "x".repeat(n) });
+  test("same inode and mode, new content (longer, then shorter), no file next to it", () => {
     const d = scratch();
     const f = join(d, "mounted.json");
-    writeFileSync(f, "old");
-    // A directory cannot be renamed over by a file: EISDIR is not on the fallback list, so use a path that is a directory to prove it still throws...
-    mkdirSync(join(d, "isdir"));
-    expect(() => atomicWrite(join(d, "isdir"), "x")).toThrow();
-    expect(readdirSync(d).sort()).toEqual(["isdir", "mounted.json"]);
-    // ...and the in-place branch, with the rename made to fail the way a bind mount fails.
-    const fs = require("node:fs");
-    const orig = io.rename;
-    io.rename = () => { throw Object.assign(new Error("busy"), { code: "EBUSY" }); };
-    try { atomicWrite(f, "new"); } finally { io.rename = orig; }
-    expect(fs.readFileSync(f, "utf8")).toBe("new");
-    expect(statSync(f).mode & 0o777).toBe(0o600);
-    expect(readdirSync(d).sort()).toEqual(["isdir", "mounted.json"]);
+    writeFileSync(f, doc(10), { mode: 0o640 });
+    const ino = statSync(f).ino;
+    overwriteJsonInPlace(f, doc(50));
+    expect(readFileSync(f, "utf8")).toBe(doc(50));
+    overwriteJsonInPlace(f, doc(5));
+    expect(readFileSync(f, "utf8")).toBe(doc(5));
+    expect(statSync(f).ino).toBe(ino);
+    expect(statSync(f).mode & 0o777).toBe(0o640);
+    expect(readdirSync(d)).toEqual(["mounted.json"]);
+  });
+  // A reader that caught the file empty (O_TRUNC, then a slow write) could take it for corrupt and reset it.
+  test("a shorter text is a whole document at every moment, including just before the cut", () => {
+    const d = scratch();
+    const f = join(d, "live.json");
+    writeFileSync(f, doc(400));
+    const { truncate } = io;
+    const seen: unknown[] = [];
+    io.truncate = (fd, len) => { seen.push(JSON.parse(readFileSync(f, "utf8"))); truncate(fd, len); };
+    try { overwriteJsonInPlace(f, doc(3)); } finally { io.truncate = truncate; }
+    expect(seen).toEqual([{ k: "xxx" }]);
+    expect(readFileSync(f, "utf8")).toBe(doc(3));
+  });
+  test("a file that is not there yet is created 0600", () => {
+    const d = scratch();
+    const old = process.umask(0);
+    try { overwriteJsonInPlace(join(d, "new.json"), "{}"); } finally { process.umask(old); }
+    expect(statSync(join(d, "new.json")).mode & 0o777).toBe(0o600);
+  });
+  test("a symlinked file stays a symlink and its target changes", () => {
+    const d = scratch();
+    mkdirSync(join(d, "dotfiles"));
+    writeFileSync(join(d, "dotfiles", "claude.json"), doc(8));
+    symlinkSync(join(d, "dotfiles", "claude.json"), join(d, "link.json"));
+    overwriteJsonInPlace(join(d, "link.json"), doc(2));
+    expect(lstatSync(join(d, "link.json")).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(d, "dotfiles", "claude.json"), "utf8")).toBe(doc(2));
+  });
+  test("is fsynced", () => {
+    const d = scratch();
+    let n = 0;
+    const { fsync } = io;
+    io.fsync = (fd) => { n++; fsync(fd); };
+    try { overwriteJsonInPlace(join(d, "a.json"), "{}"); } finally { io.fsync = fsync; }
+    expect(n).toBe(1);
   });
 });
