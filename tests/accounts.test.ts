@@ -319,6 +319,22 @@ describe("probe", () => {
     } finally { fake.stop(); }
   });
 
+  // The old refresh token is dead the moment the server rotates it, so the answer must reach the slot even if the defer verdict flips while the request is in flight.
+  test("a rotated token is stored even if Swapkin appears while the renewal is in flight", async () => {
+    let acc!: Accounts;
+    const fake = fakeServer({ onToken: () => { acc.hostSaysDeferred = true; } });
+    try {
+      const h = makeHome({ ...A, expiresAt: Date.now() - 1000 });
+      const ctx = await open(h, fake.env);
+      acc = ctx.acc;
+      await acc.saveCurrent("Work");
+      setLive(h, B);
+      await acc.saveCurrent("Home");
+      await acc.probeAll().catch(() => {}); // refusing the usage read that follows is fine
+      expect((await slot(ctx.store, "work")).oauth.refreshToken).toBe("fixture-rot-refresh-1");
+    } finally { fake.stop(); }
+  });
+
   test("a refused renewal and a 429 back off, keep the last reading, and honour Retry-After", async () => {
     const fake = fakeServer();
     try {

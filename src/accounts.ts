@@ -88,7 +88,8 @@ export class Accounts {
     } catch { /* first run */ }
     return { v: 1, accounts: [], activeId: null, timeline: [], pending: [] };
   }
-  private saveMeta(m: Meta) { this.guard(); atomicWrite(this.metaFile(), JSON.stringify(m, null, 2)); }
+  /** `own`: state the plugin already has to keep (a token the server just rotated); the defer check does not apply to it. */
+  private saveMeta(m: Meta, own = false) { if (!own) this.guard(); atomicWrite(this.metaFile(), JSON.stringify(m, null, 2)); }
   private locked<T>(fn: () => Promise<T>) { return withLock(this.dir, fn); }
 
   // ---- identity ----
@@ -104,7 +105,6 @@ export class Accounts {
     return null;
   }
   private async put(meta: Meta, id: string, b: Bundle) {
-    this.guard();
     const kind = await this.store.set(id, serialize(b));
     const a = meta.accounts.find((x) => x.id === id);
     if (a) a.storage = kind;
@@ -166,6 +166,7 @@ export class Accounts {
         // Refresh tokens rotate: the outgoing login is written to ITS OWN slot before anything else, and again if it moved while we worked.
         let saved = live, round = 0;
         for (;;) {
+          this.guard();
           await this.put(meta, outId, saved);
           await this.hooks.afterSave?.(++round);
           const now = readLive(this.paths);
@@ -213,6 +214,7 @@ export class Accounts {
       const same = await this.identify(meta, live);
       if (same) throw new Refused(`That login is already saved as "${meta.accounts.find((a) => a.id === same)!.label}".`);
       const a = this.addTo(meta, label, live, "file");
+      this.guard();
       await this.put(meta, a.id, live);
       meta.activeId = a.id;
       this.saveMeta(meta);
@@ -267,6 +269,7 @@ export class Accounts {
       const same = await this.identify(meta, b);
       if (same) { this.dropPending(meta, p.id); this.saveMeta(meta); throw new Refused(`That login is already saved as "${meta.accounts.find((a) => a.id === same)!.label}".`); }
       const a = this.addTo(meta, this.labelFor(meta, p.label), b, "file");
+      this.guard();
       await this.put(meta, a.id, b);
       this.dropPending(meta, p.id);
       this.saveMeta(meta);
@@ -336,9 +339,10 @@ export class Accounts {
       const exp = typeof b.oauth.expiresAt === "number" ? b.oauth.expiresAt : 0;
       if (typeof b.oauth.accessToken === "string" && exp - this.now() > 60_000) return b.oauth.accessToken;
       const fresh = await this.renew(b);
-      if ("retryMs" in fresh) { this.backoff(a, fresh.retryMs); this.saveMeta(meta); return null; }
+      // Past this point the old refresh token is dead, so the new pair is kept whatever Swapkin did meanwhile: the check was made before the request.
+      if ("retryMs" in fresh) { this.backoff(a, fresh.retryMs); this.saveMeta(meta, true); return null; }
       await this.put(meta, id, fresh);
-      this.saveMeta(meta);
+      this.saveMeta(meta, true);
       return fresh.oauth.accessToken as string;
     });
     if (!token) return false;

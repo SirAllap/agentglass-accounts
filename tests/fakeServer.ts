@@ -1,6 +1,6 @@
 /** A stand-in for the usage and token endpoints, on localhost, nothing real. */
 export interface Hit { path: string; auth: string | null; body: string }
-export function fakeServer(opts: { onUsage?: (token: string) => void } = {}) {
+export function fakeServer(opts: { onUsage?: (token: string) => void; onToken?: () => void } = {}) {
   const hits: Hit[] = [];
   const state = { tokenStatus: 200, usageStatus: 200, retryAfter: "", refreshN: 0, usage: {} as Record<string, unknown> };
   const server = Bun.serve({
@@ -13,6 +13,7 @@ export function fakeServer(opts: { onUsage?: (token: string) => void } = {}) {
       hits.push({ path: u.pathname, auth, body });
       const headers: Record<string, string> = state.retryAfter ? { "retry-after": state.retryAfter } : {};
       if (u.pathname === "/token") {
+        opts.onToken?.();
         if (state.tokenStatus !== 200) return new Response("{}", { status: state.tokenStatus, headers });
         const n = ++state.refreshN;
         return Response.json({ access_token: `fixture-rot-access-${n}`, refresh_token: `fixture-rot-refresh-${n}`, expires_in: 3600 });
