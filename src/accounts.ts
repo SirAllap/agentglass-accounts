@@ -124,7 +124,19 @@ export class Accounts {
   /** Run at start: mend what a crash or a half-written file left. Says what it did, or null. */
   async recover(): Promise<string | null> {
     if (this.deferred()) return null;
-    return this.locked(async () => { const said = await this.mend(this.loadMeta()); return said.length ? said.join(" ") : null; });
+    return this.locked(async () => {
+      const meta = this.loadMeta();
+      const said = await this.mend(meta);
+      this.sweepPending(meta);
+      return said.length ? said.join(" ") : null;
+    });
+  }
+  /** Drops adds nobody finished: their folder holds a full login once the person signed in, so it does not wait for the next press. Caller holds the lock. */
+  private sweepPending(meta: Meta) {
+    const old = meta.pending.filter((p) => this.now() - p.startedAt > PENDING_TTL_MS);
+    if (!old.length) return;
+    for (const p of old) this.dropPending(meta, p.id);
+    this.saveMeta(meta);
   }
 
   // ---- identity ----
@@ -319,7 +331,7 @@ export class Accounts {
     return this.locked(async () => {
       this.guard();
       const meta = this.loadMeta();
-      for (const p of meta.pending.filter((p) => this.now() - p.startedAt > PENDING_TTL_MS)) this.dropPending(meta, p.id);
+      this.sweepPending(meta);
       const label = this.labelFor(meta, raw);
       if (meta.pending.length >= 2) throw new Refused("Finish or cancel the add in progress first.");
       const id = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => (b % 36).toString(36)).join("");
@@ -401,6 +413,7 @@ export class Accounts {
   /** One pass over every saved account that is not the live login. Returns the ids it read. */
   async probeAll(): Promise<string[]> {
     if (this.deferred()) return [];
+    await this.locked(async () => this.sweepPending(this.loadMeta()));
     const read: string[] = [];
     for (const a of this.loadMeta().accounts) if (await this.probe(a.id)) read.push(a.id);
     return read;

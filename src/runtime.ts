@@ -132,12 +132,17 @@ export async function run(env: Env, o: RunOptions = {}): Promise<void> {
 
   let failures = 0;
   try {
-    await publish();
+    // A torn file or a half-finished switch left by a crash is put right before the first list goes out.
+    try { const said = await acc.recover(); if (said) say(said); } catch (e) { if (e instanceof Gone) return; log(`recover failed: ${why(e)}`); }
+    try { await publish(); } catch (e) { if (e instanceof Gone) return; log(`first post failed: ${why(e)}`); }
     while (!signal.aborted) {
       try {
         const events = await host.events(waitMs, signal);
         failures = 0;
-        for (const ev of events) await handle(ev);
+        for (const ev of events) {
+          // One press failing must not cost the rest of the batch: events are consumed once read.
+          try { await handle(ev); } catch (e) { if (e instanceof Gone) throw e; log(`event failed: ${why(e)}`); say("That did not work and nothing was changed.", "danger"); }
+        }
         // A login changed by Claude Code, a late Swapkin, a probe: no event says so, so each poll looks.
         await publish(Date.now() - lastVerdict > (o.verdictMs ?? 5 * 60_000));
       } catch (e) {

@@ -1,5 +1,5 @@
 import { describe, expect, test, afterAll } from "bun:test";
-import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Accounts, Refused, type Hooks } from "../src/accounts.ts";
 import { SecretStore, type Keyring } from "../src/store.ts";
@@ -218,6 +218,33 @@ describe("identity: the token and the account key must agree", () => {
     await acc.saveCurrent("work");
     writeCreds(h, "fixture-ra-rotated");
     await expect(acc.use("work")).rejects.toThrow("remove that account");
+  });
+});
+
+describe("an add nobody finished", () => {
+  // The folder holds a full login once the person has signed in; the age was only checked when someone pressed Add or Check again.
+  test("is swept at the next probe pass and at start, files and all", async () => {
+    let t = 1_000_000;
+    const { h, acc } = await twoSaved({}, { now: () => t });
+    await acc.startAdd("third");
+    const pending = join(h.data, "pending");
+    expect(readdirSync(pending).length).toBe(1);
+    t += 31 * 60_000;
+    await acc.probeAll();
+    expect(readdirSync(pending).length).toBe(0);
+    expect(acc.pendingList()).toEqual([]);
+    await acc.startAdd("fourth");
+    t += 31 * 60_000;
+    await acc.recover();
+    expect(readdirSync(pending).length).toBe(0);
+  });
+  test("a fresh one stays", async () => {
+    let t = 1_000_000;
+    const { h, acc } = await twoSaved({}, { now: () => t });
+    await acc.startAdd("third");
+    t += 5 * 60_000;
+    await acc.probeAll();
+    expect(readdirSync(join(h.data, "pending")).length).toBe(1);
   });
 });
 

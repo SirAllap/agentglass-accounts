@@ -4,6 +4,7 @@ import { Accounts } from "../src/accounts.ts";
 import { SecretStore } from "../src/store.ts";
 import { parseBundle } from "../src/claude.ts";
 import { run } from "../src/runtime.ts";
+import { hostClient, type Host } from "../src/host.ts";
 import { makeHome, setLive, readJson, cleanup, treeHash, stub, type Home, type Login } from "./helpers.ts";
 import { fakeHost, until, nodes } from "./fakeHost.ts";
 import { fakeServer } from "./fakeServer.ts";
@@ -15,16 +16,17 @@ const live = (h: Home) => readJson(h.credsFile).claudeAiOauth.refreshToken as st
 const texts = (t: any) => nodes(t).flatMap((n) => [n.text, n.title, n.label, n.body].filter((x) => typeof x === "string")).join("\n");
 
 /** work = A, home = B saved; live = B. The loop runs against a fake host until stop(). */
-async function boot(o: { extra?: Record<string, string>; run?: Record<string, unknown>; saved?: boolean } = {}) {
+async function boot(o: { extra?: Record<string, string>; run?: Record<string, unknown>; saved?: boolean; before?: (h: Home, acc: Accounts) => Promise<void> | void; settleMs?: number; wrapHost?: (h: Host) => Host } = {}) {
   const h = makeHome(A);
   const host = fakeHost();
   const env = { ...h.env, AGENTGLASS_URL: host.url, AGENTGLASS_READ_TOKEN: host.token } as Record<string, string>;
   const store = await SecretStore.open(h.data, { keyring: null });
-  const acc = new Accounts(env, { store });
+  const acc = new Accounts(env, { store, settleMs: o.settleMs ?? 0 });
   if (o.saved !== false) { await acc.saveCurrent("work"); setLive(h, B); await acc.saveCurrent("home"); }
+  await o.before?.(h, acc);
   Object.assign(env, o.extra); // after seeding: a seeded account needs Swapkin absent
   const ac = new AbortController();
-  const done = run(env, { acc, signal: ac.signal, waitMs: 30, retryMs: 10, firstProbeMs: 1e9, probeMs: 1e9, ...o.run });
+  const done = run(env, { acc, signal: ac.signal, ...(o.wrapHost ? { host: o.wrapHost(hostClient(env)) } : {}), waitMs: 30, retryMs: 10, firstProbeMs: 1e9, probeMs: 1e9, ...o.run });
   const stop = async () => { ac.abort(); await done; host.stop(); };
   return { h, host, acc, store, done, stop, env };
 }
@@ -86,6 +88,50 @@ describe("account.switch", () => {
     t.host.push({ type: "something-new" });
     await Bun.sleep(150);
     expect(treeHash(t.h.home, t.h.data)).toBe(before);
+    await t.stop();
+  });
+});
+
+describe("start with a file caught half written", () => {
+  const tear = (h: Home) => require("node:fs").writeFileSync(h.credsFile, '{"claudeAiOauth":{"accessTok');
+
+  // The first publish was outside any catch, so a file caught mid-write ended the plugin with exit 2.
+  test("the plugin posts its list and keeps running", async () => {
+    const t = await boot({ before: (h) => tear(h) });
+    await until(() => t.host.accounts.length > 0, 4000, "first post");
+    expect(t.host.accounts[0].accounts.map((a: any) => a.active)).toEqual([false, false]);
+    const ended = await Promise.race([t.done.then(() => true), Bun.sleep(150).then(() => false)]);
+    expect(ended).toBe(false);
+    await t.stop();
+  });
+
+  test("a torn file is put back from the copy of the last switch before anything is posted", async () => {
+    const t = await boot({ before: async (h, acc) => { await acc.use("work"); tear(h); } });
+    await until(() => t.host.panels.length > 0, 4000, "first page");
+    expect(live(t.h)).toBe("fixture-ra");
+    expect(texts(t.host.lastPanel())).toContain("Restored Claude Code's login file");
+    expect(t.host.accounts[0].accounts.map((a: any) => [a.id, a.active])).toEqual([["work", true], ["home", false]]);
+    await t.stop();
+  });
+});
+
+describe("one event failing does not cost the ones after it", () => {
+  test("a first post that throws does not end the run: the next pass posts the list", async () => {
+    let posts = 0;
+    const t = await boot({ wrapHost: (real) => ({ ...real, postAccounts: async (b) => { if (++posts === 1) throw new Error("network"); return real.postAccounts(b); } }) });
+    await until(() => t.host.accounts.length > 0, 4000, "the list after the failed first post");
+    await t.stop();
+  });
+
+  // The press was served after a forced post; when that post threw, the rest of the batch was dropped without a word, and events are consumed on read.
+  test("a post that throws while serving one press, then the next press", async () => {
+    let posts = 0;
+    const t = await boot({ wrapHost: (real) => ({ ...real, postAccounts: async (b) => { if (++posts === 2) throw new Error("network"); return real.postAccounts(b); } }) });
+    await until(() => t.host.accounts.length > 0);
+    t.host.push({ type: "account.switch", provider: "anthropic", id: "home" }); // already in use: its forced post is the one that throws
+    t.host.push({ type: "account.switch", provider: "anthropic", id: "work" });
+    await until(() => live(t.h) === "fixture-ra", 4000, "the second press");
+    await until(() => texts(t.host.lastPanel()).includes("That did not work") || t.host.accounts.length > 1, 4000, "the page after");
     await t.stop();
   });
 });
