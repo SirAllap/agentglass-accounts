@@ -6,13 +6,31 @@
   "scope": "read",
   "sandbox": {
     "network": "internet",
-    "read": ["~/.claude", "~/.claude.json"],
-    "write": ["~/.claude", "~/.claude.json"],
-    "programs": ["claude", "bun"]
+    "read": [
+      "~/.claude",
+      "~/.claude.json"
+    ],
+    "write": [
+      "~/.claude",
+      "~/.claude.json"
+    ],
+    "programs": [
+      "claude",
+      "bun"
+    ]
   },
   "icon": "icon.svg",
   "color": "#a78bfa",
   "contributes": {
-    "accounts": ["anthropic"]
+    "accounts": [
+      "anthropic"
+    ],
+    "panels": [
+      {
+        "id": "accounts",
+        "title": "Accounts",
+        "icon": "list"
+      }
+    ]
   }
 }
