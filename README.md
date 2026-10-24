@@ -168,19 +168,34 @@ Given by the host: `PATH`, `HOME`, `AGENTGLASS_READ_TOKEN`, `AGENTGLASS_URL`,
 - A probe holds the lock while it renews a token (up to 8 s), so a switch can
   wait that long.
 - Only the 5 hour and 7 day windows are read, not per-model limits.
-- **Unverified against the real service:** the token refresh endpoint and the
-  client id are written from memory of Claude Code and were only ever answered
-  by a fake server on localhost. The usage endpoint and its response shape come
-  from the app's own reader. Until someone checks the refresh against the real
-  service (and the `claude auth login` command printed for adding an account is
-  also unverified: the real `claude` was off limits), a probe of an account you
-  are not using may fail (it backs off and
-  keeps the last reading); `ACCOUNTS_TOKEN_URL` overrides the URL.
+- **Unverified against the real service:** the token refresh endpoint, the
+  client id and the request body are written from memory of Claude Code and
+  were only ever answered by a fake server on localhost. Swapkin's source does
+  not say either: its Claude adapter never refreshes a token itself and hands
+  the usage read to another program (`omarchy-swapkin` `bin/providers/claude.sh`
+  lines 191-192), which was not read. The usage endpoint and its response shape
+  come from the app's own reader. Until someone checks the refresh against the
+  real service, a probe of an account you are not using may fail (it backs off
+  and keeps the last reading); `ACCOUNTS_TOKEN_URL` overrides the URL.
+- **Verified from Swapkin's source** (`omarchy-swapkin`, not run): the add flow
+  starts plain `claude` with `CLAUDE_CONFIG_DIR` on a throwaway folder and the
+  person types `/login` (`bin/providers/claude.sh` lines 145-160); a finished
+  sign-in is `.credentials.json` holding `claudeAiOauth.refreshToken` in that
+  folder (line 164), with the account keys in `<folder>/.claude.json` (lines 24
+  and 166). Swapkin waits one second after the file appears so the account keys
+  are written too (line 165); here "I signed in, check" is pressed by the
+  person; a check pressed before the keys are there answers "not yet" and
+  imports nothing.
 - The entrypoint starts `bun` from `/tmp`, not from the install folder: in the
   box `bun` must open the parents of its working directory and cannot
   (`CouldntReadCurrentDirectory`).
-- Swapkin's `providers --json` shape was not measured; a mismatch falls back to
-  the plugin's own list, read only.
+- Swapkin's `providers --json` shape is **verified from source** (`bin/swapkin`
+  lines 363-402 and 406-417, `docs/providers.md` lines 126-145), not by running
+  it: `{demo, providers:[{id:"claude", ..., accounts:[{name, active, plan,
+  limits:[{label, percent, resetsAt}], ...}]}]}`, `percent` a fraction used
+  (0..1), no tokens in it. It gives no window length, so the plugin takes it
+  from the label (5 hour, week, month) and leaves out a limit whose label says
+  none of them. Any other shape falls back to the plugin's own list, read only.
 - A keyring entry that cannot be deleted when you remove an account stays in the
   keyring.
 
