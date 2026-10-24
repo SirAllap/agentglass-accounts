@@ -188,6 +188,8 @@ describe("add, remove, edit", () => {
     const { pendingId, command } = await acc.startAdd("Home");
     const dir = join(h.data, "pending", pendingId);
     expect(command).toBe(`CLAUDE_CONFIG_DIR='${dir}' claude auth login`);
+    expect(acc.addCommand(pendingId)).toBe(command);
+    expect(() => acc.addCommand("../x")).toThrow(Refused);
     expect(statSync(dir).mode & 0o777).toBe(0o700);
     expect(await acc.finishAdd(pendingId)).toEqual({ done: false });
     const t = makeHome(B); // a login made elsewhere, written where `claude` would have put it

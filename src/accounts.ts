@@ -241,9 +241,12 @@ export class Accounts {
       chmodSync(this.pendingDir(id), 0o700);
       meta.pending.push({ id, label, startedAt: this.now() });
       this.saveMeta(meta);
-      return { pendingId: id, command: `CLAUDE_CONFIG_DIR='${this.pendingDir(id)}' claude auth login` };
+      return { pendingId: id, command: this.addCommand(id) };
     });
   }
+
+  /** The command to tell the person for an add in progress; the page shows it again after a redraw. */
+  addCommand(pendingId: string): string { return `CLAUDE_CONFIG_DIR='${this.pendingDir(pendingId)}' claude auth login`; }
 
   /** Looks for the login the throwaway dir was given. `done:false` means "not yet". */
   async finishAdd(pendingId: string): Promise<{ done: boolean; id?: string }> {
