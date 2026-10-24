@@ -130,8 +130,10 @@ export class Accounts {
     const taken = new Set<string>(), seen = new Set<string>();
     if (m) {
       const accounts = m.slice(0, MAX_ACCOUNTS).map((a, i) => {
-        let label = safeText(a.name, 32) || `Account ${i + 1}`;
-        while (seen.has(label.toLowerCase())) label = `${label.slice(0, 28)} ${i + 1}`;
+        const base = safeText(a.name, 32) || `Account ${i + 1}`;
+        let label = base;
+        // A counter, not the position: cutting to 28 and adding the position returned the same string for a name already shaped like that, and the loop never ended.
+        for (let n = 2; seen.has(label.toLowerCase()); n++) label = `${base.slice(0, 28)} ${n}`;
         seen.add(label.toLowerCase());
         const id = slug(label, taken); taken.add(id);
         const windows = a.windows.slice(0, 6).filter((w) => w.label && w.usedPercent >= 0 && w.usedPercent <= 100 && w.minutes >= 1 && w.minutes <= 44640);

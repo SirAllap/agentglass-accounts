@@ -2,6 +2,8 @@ import { describe, expect, test, afterAll } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { swapkinPresent, parseMirror, mirror } from "../src/swapkin.ts";
+import { Accounts } from "../src/accounts.ts";
+import { SecretStore } from "../src/store.ts";
 import { makeHome, stub, cleanup, coreProblem } from "./helpers.ts";
 
 afterAll(cleanup);
@@ -68,4 +70,19 @@ describe("swapkin mirror", () => {
   test("helper validator rejects a token-shaped label (guards the guard)", () => {
     expect(coreProblem({ provider: "anthropic", accounts: [{ id: "a", label: "x@y.co", plan: "", colour: "blue", active: false, storage: "file" }] })).not.toBeNull();
   });
+});
+
+describe("mirrored names", () => {
+  // A name of 28 characters plus " 2", twice: the old rename (cut to 28, add the index) gave the same string back for ever and froze the process.
+  test("two names that collide after the rename still end", async () => {
+    const h = makeHome();
+    const n = "abcdefghij abcdefghij abcdef 2";
+    stub(h, "swapkin", `echo '${JSON.stringify({ providers: [{ provider: "anthropic", accounts: [{ name: n, plan: "Max", active: false }, { name: n.toUpperCase(), plan: "Max", active: false }, { name: "other", plan: "Max", active: false }] }] })}'`);
+    const acc = new Accounts(h.env, { store: await SecretStore.open(h.data, { keyring: null }) });
+    const b = await acc.body();
+    expect(b.accounts.length).toBe(3);
+    expect(new Set(b.accounts.map((a) => a.label.toLowerCase())).size).toBe(3);
+    expect(b.accounts.every((a) => a.label.length <= 32)).toBe(true);
+    expect(coreProblem(b)).toBeNull();
+  }, 3000);
 });
