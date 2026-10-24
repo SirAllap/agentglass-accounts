@@ -427,6 +427,22 @@ describe("add, remove, edit", () => {
     expect(acc.pendingList()).toEqual([]);
   });
 
+  // Swapkin waits a second after .credentials.json appears so the account keys are written too (claude.sh:165); a check pressed in between saw a login with no account key and filed it, which later never matches.
+  test("a throwaway login whose account keys are not written yet is 'not yet', and imports once they are", async () => {
+    const h = makeHome(A);
+    const { acc } = await open(h);
+    await acc.saveCurrent("Work");
+    const { pendingId } = await acc.startAdd("Home");
+    const dir = join(h.data, "pending", pendingId);
+    const t = makeHome(B);
+    writeFileSync(join(dir, ".credentials.json"), readFileSync(t.credsFile));
+    writeFileSync(join(dir, ".claude.json"), JSON.stringify({ theme: "dark" }));
+    expect(await acc.finishAdd(pendingId)).toEqual({ done: false });
+    expect(acc.pendingList().length).toBe(1);
+    writeFileSync(join(dir, ".claude.json"), readFileSync(t.claudeJson));
+    expect(await acc.finishAdd(pendingId)).toEqual({ done: true, id: "home" });
+  });
+
   test("an add that sat too long is cancelled; a pending id that climbs out is refused", async () => {
     const h = makeHome(A);
     let t = 1_000_000;

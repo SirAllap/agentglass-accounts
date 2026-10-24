@@ -370,7 +370,7 @@ export class Accounts {
       const dir = this.pendingDir(pendingId);
       let b: Bundle | null;
       try { b = readLive({ creds: join(dir, ".credentials.json"), json: join(dir, ".claude.json") }); } catch { b = null; } // claude is still writing it
-      if (!b) return { done: false };
+      if (!b || !b.account) return { done: false }; // a fresh sign-in always writes its account keys, a moment after the credentials
       const same = await this.identify(meta, b);
       if (same) { this.dropPending(meta, p.id); this.saveMeta(meta); throw new Refused(`That login is already saved as "${meta.accounts.find((a) => a.id === same)!.label}".`); }
       const a = this.addTo(meta, this.labelFor(meta, p.label), b, "file");
