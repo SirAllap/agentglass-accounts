@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { swapkinPresent, parseMirror, mirror } from "../src/swapkin.ts";
 import { Accounts } from "../src/accounts.ts";
 import { SecretStore } from "../src/store.ts";
-import { makeHome, stub, cleanup, coreProblem } from "./helpers.ts";
+import { makeHome, stub, cleanup, coreProblem, swapkinJson, swapkinAcct } from "./helpers.ts";
 
 afterAll(cleanup);
 
@@ -40,20 +40,27 @@ describe("swapkin detection", () => {
   });
 });
 
-const GOOD = JSON.stringify({ providers: [{ provider: "anthropic", accounts: [
-  { name: "work", plan: "Max", active: true, windows: [{ label: "5h", minutes: 300, usedPercent: 12, resetsAt: null }], token: "sk-ant-secret" },
-  { name: "home", plan: "Pro", active: false },
-] }] });
+const GOOD = swapkinJson([
+  { ...swapkinAcct("work", "max", true, [{ label: "Session (5-hour)", title: "Session", percent: 0.123, resetsAt: "2026-10-24T15:00:00Z", used: 12, limit: 100, unit: "requests" }, { label: "Weekly", percent: 0.5, resetsAt: "2026-10-30T00:00:00Z" }]), token: "sk-ant-secret" },
+  swapkinAcct("home", "pro", false),
+]);
 
 describe("swapkin mirror", () => {
-  test("keeps the public fields only", () => {
+  test("reads the claude entry of the real shape: limits as fractions, minutes from the label, nothing else copied", () => {
     const m = parseMirror(GOOD)!;
-    expect(m.map((a) => a.name)).toEqual(["work", "home"]);
-    expect(m[0].windows[0].usedPercent).toBe(12);
-    expect(JSON.stringify(m)).not.toContain("sk-ant");
+    expect(m.map((a) => [a.name, a.plan, a.active])).toEqual([["work", "max", true], ["home", "pro", false]]);
+    expect(m[0].windows).toEqual([
+      { label: "Session (5-hour)", minutes: 300, usedPercent: 12, resetsAt: "2026-10-24T15:00:00.000Z" },
+      { label: "Weekly", minutes: 10080, usedPercent: 50, resetsAt: "2026-10-30T00:00:00.000Z" }]);
+    expect(m[1].windows).toEqual([]);
+    expect(JSON.stringify(m)).not.toMatch(/sk-ant|codex|side|#7fa7d9/);
+  });
+  test("a limit whose window length the label does not give is left out, a fraction past 1 is capped", () => {
+    const j = swapkinJson([swapkinAcct("work", "pro", false, [{ label: "Requests today", percent: 0.1 }, { label: "Weekly", percent: 1.4 }, { label: "Weekly cap", percent: "x" }])]);
+    expect(parseMirror(j)![0].windows).toEqual([{ label: "Weekly", minutes: 10080, usedPercent: 100, resetsAt: null }]);
   });
   test("any other shape is null", () => {
-    for (const t of ["", "nope", "[]", '{"providers":[]}', '{"providers":[{"provider":"anthropic","accounts":[{"plan":"x"}]}]}']) expect(parseMirror(t)).toBeNull();
+    for (const t of ["", "nope", "[]", '{"providers":[]}', '{"providers":[{"id":"claude","accounts":[{"plan":"x"}]}]}', swapkinJson([]).replace('"id":"claude"', '"id":"other"')]) expect(parseMirror(t)).toBeNull();
   });
   test("runs the stub on the given PATH", async () => {
     const h = makeHome();
@@ -77,7 +84,7 @@ describe("mirrored names", () => {
   test("two names that collide after the rename still end", async () => {
     const h = makeHome();
     const n = "abcdefghij abcdefghij abcdef 2";
-    stub(h, "swapkin", `echo '${JSON.stringify({ providers: [{ provider: "anthropic", accounts: [{ name: n, plan: "Max", active: false }, { name: n.toUpperCase(), plan: "Max", active: false }, { name: "other", plan: "Max", active: false }] }] })}'`);
+    stub(h, "swapkin", `echo '${swapkinJson([swapkinAcct(n, "max", false), swapkinAcct(n.toUpperCase(), "max", false), swapkinAcct("other", "max", false)])}'`);
     const acc = new Accounts(h.env, { store: await SecretStore.open(h.data, { keyring: null }) });
     const b = await acc.body();
     expect(b.accounts.length).toBe(3);

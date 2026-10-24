@@ -105,3 +105,16 @@ export function coreProblem(body: any): string | null {
   if (body.accounts.filter((a: any) => a.active).length > 1) return "two active";
   return null;
 }
+
+/** The shape `swapkin providers --json` prints (bin/swapkin provider_entry_json), with invented accounts; a second provider is there to be ignored. */
+export function swapkinJson(accounts: object[]): string {
+  const entry = (id: string, name: string, mode: string, accs: object[]) => ({ id, name, mode, modeLabel: "next message", modeWords: "Open sessions use the new account on their next message.",
+    store: `/home/user/.${id}/creds`, how: "Switching updates the shared login.", addHint: "The first account is whatever is already signed in.", installed: true, sessions: 1, accounts: accs });
+  return JSON.stringify({ demo: false, providers: [
+    entry("codex", "Codex", "cold", [{ name: "side", active: true, colour: "#d97757", plan: "", age: 5, limits: [], counts: [], note: "", tierLabel: "", updatedAt: "", weekly: null }]),
+    entry("claude", "Claude Code", "hot", accounts)] });
+}
+/** One account as swapkin lists it: `percent` is a fraction used (0..1), `plan` is the subscription type and may be empty. */
+export function swapkinAcct(name: string, plan: string, active: boolean, limits: object[] = []): object {
+  return { name, active, colour: "#7fa7d9", plan, age: 120, limits, counts: [], note: "", tierLabel: plan, updatedAt: "2026-10-24T12:00:00Z", weekly: null };
+}

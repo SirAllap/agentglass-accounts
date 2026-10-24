@@ -5,7 +5,7 @@ import { Accounts, Refused, type Hooks } from "../src/accounts.ts";
 import { SecretStore, type Keyring } from "../src/store.ts";
 import { parseBundle } from "../src/claude.ts";
 import { io } from "../src/fsutil.ts";
-import { makeHome, setLive, readJson, cleanup, treeHash, stub, coreProblem, type Home, type Login } from "./helpers.ts";
+import { makeHome, setLive, readJson, cleanup, treeHash, stub, coreProblem, swapkinJson, swapkinAcct, type Home, type Login } from "./helpers.ts";
 import { fakeServer } from "./fakeServer.ts";
 
 afterAll(cleanup);
@@ -692,9 +692,8 @@ describe("Swapkin: detect and defer", () => {
 
   test("read-only list: Swapkin's public fields, deferTo set, the core accepts it, no secret field copied", async () => {
     const { h, acc } = await twoSaved();
-    const out = JSON.stringify({ providers: [{ provider: "anthropic", accounts: [
-      { name: "Work", plan: "Max", active: true, windows: [], token: "sk-ant-xyz", email: "me@acme.test" },
-      { name: "Home", plan: "Pro", active: false, windows: [{ label: "5h", minutes: 300, usedPercent: 20, resetsAt: null }] }] }] });
+    const out = swapkinJson([{ ...swapkinAcct("Work", "max", true), token: "sk-ant-xyz", email: "me@acme.test" },
+      swapkinAcct("Home", "pro", false, [{ label: "Session (5-hour)", percent: 0.2, resetsAt: null }])]);
     stub(h, "swapkin", `printf '%s' '${out}'`);
     const before = treeHash(h.home, h.data);
     const body = await acc.body();
