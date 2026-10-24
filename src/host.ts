@@ -26,13 +26,14 @@ export function hostClient(env: Env, f: typeof fetch = fetch) {
   return {
     postAccounts: (body: Body) => post("/plugin/self/accounts", body),
     postPanel: (id: string, tree: unknown) => post("/plugin/self/panel", { id, tree }),
-    /** What the app says about the list it holds for anthropic: "swapkin" when it verified Swapkin itself. null when it cannot be read. */
+    /** What the app says about the list it holds for anthropic: "swapkin" when it verified Swapkin itself, "" when nobody manages it. null when it cannot be read or lists nothing for us. */
     async managedBy(): Promise<string | null> {
       const r = await call("/usage/accounts", { timeoutMs: 10_000 });
       if (!r.ok) return null;
       const j = (await r.json().catch(() => null)) as { providers?: { provider?: unknown; managedBy?: unknown }[] } | null;
       const p = j?.providers?.find((x) => x.provider === "anthropic");
-      return p && typeof p.managedBy === "string" ? p.managedBy : "";
+      // No entry for the provider is no answer; an entry without `managedBy` is the app saying nobody manages it.
+      return p ? (typeof p.managedBy === "string" ? p.managedBy : "") : null;
     },
     /** Long poll. Resolves with the events queued, or none after `waitMs`; throws on a network error or a non-2xx. */
     async events(waitMs: number, signal?: AbortSignal): Promise<HostEvent[]> {

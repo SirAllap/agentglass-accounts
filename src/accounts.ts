@@ -10,6 +10,8 @@ import { swapkinPresent, mirror, type Env } from "./swapkin.ts";
 export class Refused extends Error {}
 
 export const DEFER_SENTENCE = "Swapkin manages your Claude logins on this machine, so this plugin changes nothing. Use Swapkin to switch, add or remove accounts.";
+export const UNCONFIRMED_SENTENCE = "The app has not confirmed that Swapkin is not managing your Claude logins, so nothing was changed. Try again in a moment.";
+export type Verdict = "unknown" | "none" | "swapkin";
 const MAX_ACCOUNTS = 8;
 const COLOURS = ["blue", "violet", "green", "amber", "rose", "cyan", "teal", "neutral"];
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -77,11 +79,20 @@ export class Accounts {
     return new Accounts(env, { ...o, store: o.store ?? (await SecretStore.open(env.AGENTGLASS_PLUGIN_DATA)) });
   }
 
-  /** What the app reports. A boxed plugin has no PATH entry or folder to find Swapkin by, so the app's own look (same fact, outside the box) counts as much as ours. */
-  hostSaysDeferred = false;
-  deferred = () => this.hostSaysDeferred || swapkinPresent(this.env);
+  /**
+   * What the app reports about Swapkin. A boxed plugin has no PATH entry or folder to find it by, so the app's own look (the same fact, from outside the box) is the only evidence there.
+   * "none" is an explicit no. "unknown" is no answer (the list was refused, the read failed, the app lists nothing for us): writes wait for a no.
+   * The runtime starts at "unknown"; a plugin used without a host (the tests) starts at "none".
+   */
+  hostVerdict: Verdict = "none";
+  get hostSaysDeferred() { return this.hostVerdict === "swapkin"; }
+  set hostSaysDeferred(v: boolean) { this.hostVerdict = v ? "swapkin" : "none"; }
+  deferred = () => this.hostVerdict === "swapkin" || swapkinPresent(this.env);
   /** Asked right before every write, not once at the top: Swapkin can be installed while a switch is running. */
-  private guard() { if (this.deferred()) throw new Refused(DEFER_SENTENCE); }
+  private guard() {
+    if (this.deferred()) throw new Refused(DEFER_SENTENCE);
+    if (this.hostVerdict === "unknown") throw new Refused(UNCONFIRMED_SENTENCE);
+  }
 
   // ---- metadata (no secret, no email, no uuid) ----
   private metaFile = () => join(this.dir, "accounts.json");
@@ -105,6 +116,7 @@ export class Accounts {
   }
   /** A torn live file is restored from the copy the last switch made; a switch that died between its two writes is finished. Under the lock, before anything reads the live login. */
   private async mend(meta: Meta): Promise<string[]> {
+    this.guard();
     const said: string[] = [];
     if ((await recoverLive(this.paths, this.backupDir, this.settleMs)).length) said.push("Restored Claude Code's login file from the copy made before the last switch.");
     if (meta.switching) {
@@ -412,7 +424,7 @@ export class Accounts {
 
   /** One pass over every saved account that is not the live login. Returns the ids it read. */
   async probeAll(): Promise<string[]> {
-    if (this.deferred()) return [];
+    if (this.deferred() || this.hostVerdict === "unknown") return [];
     await this.locked(async () => this.sweepPending(this.loadMeta()));
     const read: string[] = [];
     for (const a of this.loadMeta().accounts) if (await this.probe(a.id)) read.push(a.id);

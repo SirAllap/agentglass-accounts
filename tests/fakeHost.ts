@@ -6,7 +6,7 @@ export function fakeHost(token = "host-fixture-token") {
   const panels: { id: string; tree: any }[] = [];
   const queue: unknown[] = [];
   const waiters = new Set<() => void>();
-  const state = { status: 0, eventFailures: 0, polls: 0, acceptPanel: true, refuseAccounts: false, swapkin: false, gets: 0 };
+  const state = { status: 0, eventFailures: 0, polls: 0, acceptPanel: true, refuseAccounts: false, swapkin: false, gets: 0, getStatus: 0, hideEntry: false };
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -26,6 +26,8 @@ export function fakeHost(token = "host-fixture-token") {
       if (u.pathname === "/usage/accounts" && req.method === "GET") {
         // The core's own verdict: managed only when the plugin asked with deferTo AND Swapkin is there for the core to see.
         state.gets++;
+        if (state.getStatus) return new Response("no", { status: state.getStatus });
+        if (state.hideEntry) return Response.json({ ok: true, providers: [] });
         const l = accounts.at(-1);
         if (!l) return Response.json({ ok: true, providers: [] });
         const managed = state.swapkin && l.deferTo === "swapkin";

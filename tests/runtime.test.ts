@@ -105,12 +105,70 @@ describe("start with a file caught half written", () => {
     await t.stop();
   });
 
-  test("a torn file is put back from the copy of the last switch before anything is posted", async () => {
+  test("a torn file is put back from the copy of the last switch, and the page says so", async () => {
     const t = await boot({ before: async (h, acc) => { await acc.use("work"); tear(h); } });
-    await until(() => t.host.panels.length > 0, 4000, "first page");
+    await until(() => texts(t.host.lastPanel()).includes("Restored Claude Code's login file"), 4000, "the page");
     expect(live(t.h)).toBe("fixture-ra");
-    expect(texts(t.host.lastPanel())).toContain("Restored Claude Code's login file");
-    expect(t.host.accounts[0].accounts.map((a: any) => [a.id, a.active])).toEqual([["work", true], ["home", false]]);
+    expect(t.host.last().accounts.map((a: any) => [a.id, a.active])).toEqual([["work", true], ["home", false]]);
+    await t.stop();
+  });
+});
+
+// Inside the box this process cannot see Swapkin, so the app's answer is the only evidence. No answer is not "no".
+describe("a press that writes needs the app's explicit no-Swapkin answer", () => {
+  const press = async (t: Awaited<ReturnType<typeof boot>>) => {
+    t.host.push({ type: "account.switch", provider: "anthropic", id: "work" });
+    await until(() => texts(t.host.lastPanel()).includes("has not confirmed"), 4000, "the refusal on the page");
+  };
+  test("the app refused the list: the press is refused and nothing is written", async () => {
+    const t = await boot();
+    await until(() => t.host.accounts.length > 0);
+    t.host.state.refuseAccounts = true;
+    const before = treeHash(t.h.home, t.h.data);
+    await press(t);
+    expect(treeHash(t.h.home, t.h.data)).toBe(before);
+    await t.stop();
+  });
+  test("the app's answer cannot be read: refused", async () => {
+    const t = await boot();
+    await until(() => t.host.accounts.length > 0);
+    t.host.state.getStatus = 500;
+    const before = treeHash(t.h.home, t.h.data);
+    await press(t);
+    expect(treeHash(t.h.home, t.h.data)).toBe(before);
+    await t.stop();
+  });
+  test("the app's answer has no entry for this provider: refused", async () => {
+    const t = await boot();
+    await until(() => t.host.accounts.length > 0);
+    t.host.state.hideEntry = true;
+    const before = treeHash(t.h.home, t.h.data);
+    await press(t);
+    expect(treeHash(t.h.home, t.h.data)).toBe(before);
+    await t.stop();
+  });
+  test("a post that throws leaves the answer unknown until a post goes through", async () => {
+    let posts = 0;
+    const t = await boot({ wrapHost: (real) => ({ ...real, postAccounts: async (b) => { if (++posts === 2) throw new Error("network"); return real.postAccounts(b); } }) });
+    await until(() => t.host.accounts.length > 0);
+    t.host.push({ type: "account.manage", provider: "anthropic" }); // no write: only the forced post below throws
+    t.host.push({ type: "account.switch", provider: "anthropic", id: "home" });
+    await until(() => posts >= 2, 4000, "the failing post");
+    await Bun.sleep(100);
+    expect(t.acc.hostVerdict).toBe("unknown");
+    t.host.push({ type: "account.switch", provider: "anthropic", id: "work" });
+    await until(() => live(t.h) === "fixture-ra", 4000, "the next press");
+    expect(t.acc.hostVerdict).toBe("none");
+    await t.stop();
+  });
+  test("once the app answers no again, the same press works", async () => {
+    const t = await boot();
+    await until(() => t.host.accounts.length > 0);
+    t.host.state.getStatus = 500;
+    await press(t);
+    t.host.state.getStatus = 0;
+    t.host.push({ type: "account.switch", provider: "anthropic", id: "work" });
+    await until(() => live(t.h) === "fixture-ra", 4000, "the switch");
     await t.stop();
   });
 });

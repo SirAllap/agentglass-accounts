@@ -1,4 +1,4 @@
-import { Accounts, Refused, type Body } from "./accounts.ts";
+import { Accounts, Refused, type Body, type Verdict } from "./accounts.ts";
 import { Gone, hostClient, type Host, type HostEvent } from "./host.ts";
 import { manageTree, type Notice } from "./panel.ts";
 import type { Env } from "./swapkin.ts";
@@ -33,6 +33,7 @@ const rec = (v: unknown): Record<string, unknown> => (v && typeof v === "object"
 export async function run(env: Env, o: RunOptions = {}): Promise<void> {
   const host = o.host ?? hostClient(env);
   const acc = o.acc ?? (await Accounts.open(env));
+  acc.hostVerdict = "unknown"; // until the app has answered for the first list this process posts
   // Only the error's class and code are logged: a message from a parser can quote the file it choked on.
   const log = o.log ?? ((l: string) => console.error(`accounts: ${l}`));
   const why = (e: unknown) => `${(e as Error)?.name ?? "error"}${(e as { code?: string })?.code ? ` ${(e as { code?: string }).code}` : ""}`;
@@ -61,12 +62,18 @@ export async function run(env: Env, o: RunOptions = {}): Promise<void> {
       const text = JSON.stringify(body);
       let again = false;
       if (force || text !== lastBody) {
-        const err = await host.postAccounts(body);
+        let err: string | null;
+        try { err = await host.postAccounts(body); } catch (e) { acc.hostVerdict = "unknown"; throw e; }
         if (err === null) {
           lastBody = text; lastErr = ""; lastVerdict = Date.now();
           const verdict = await host.managedBy().catch((e) => { if (e instanceof Gone) throw e; return null; });
-          if (verdict !== null && (verdict === "swapkin") !== acc.hostSaysDeferred) { acc.hostSaysDeferred = verdict === "swapkin"; again = true; }
-        } else if (err !== lastErr) { lastErr = err; log(`the app refused the list: ${err}`); }
+          const next: Verdict = verdict === null ? "unknown" : verdict === "swapkin" ? "swapkin" : "none";
+          again = (next === "swapkin") !== (acc.hostVerdict === "swapkin");
+          acc.hostVerdict = next;
+        } else {
+          acc.hostVerdict = "unknown"; // the app did not take this list, so nothing it says about Swapkin applies to it
+          if (err !== lastErr) { lastErr = err; log(`the app refused the list: ${err}`); }
+        }
       }
       if (again) { force = true; continue; } // the list differs now (read-only, mirrored): say so
       await draw(body);
@@ -132,9 +139,9 @@ export async function run(env: Env, o: RunOptions = {}): Promise<void> {
 
   let failures = 0;
   try {
-    // A torn file or a half-finished switch left by a crash is put right before the first list goes out.
-    try { const said = await acc.recover(); if (said) say(said); } catch (e) { if (e instanceof Gone) return; log(`recover failed: ${why(e)}`); }
     try { await publish(); } catch (e) { if (e instanceof Gone) return; log(`first post failed: ${why(e)}`); }
+    // A torn file or a half-finished switch left by a crash is put right once the app has said whether Swapkin manages the logins.
+    try { const said = await acc.recover(); if (said) { say(said); await publish(); } } catch (e) { if (e instanceof Gone) return; log(`recover failed: ${why(e)}`); }
     while (!signal.aborted) {
       try {
         const events = await host.events(waitMs, signal);

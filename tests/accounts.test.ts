@@ -602,6 +602,27 @@ describe("probe", () => {
   });
 });
 
+describe("a defer verdict the app has not given", () => {
+  test("every write is refused until the answer is no, and the probe stays quiet", async () => {
+    const fake = fakeServer();
+    try {
+      const { h, acc } = await twoSaved(fake.env);
+      acc.hostVerdict = "unknown";
+      const before = treeHash(h.home, h.data);
+      await expect(acc.use("work")).rejects.toThrow("has not confirmed");
+      await expect(acc.saveCurrent("copy")).rejects.toThrow("has not confirmed");
+      await expect(acc.startAdd("third")).rejects.toThrow("has not confirmed");
+      await expect(acc.remove("work")).rejects.toThrow("has not confirmed");
+      expect(await acc.probeAll()).toEqual([]);
+      expect(fake.hits.length).toBe(0);
+      expect(treeHash(h.home, h.data)).toBe(before);
+      acc.hostVerdict = "none";
+      await acc.use("work");
+      expect(live(h)).toBe("fixture-ra");
+    } finally { fake.stop(); }
+  });
+});
+
 describe("Swapkin: detect and defer", () => {
   const ops = (acc: Accounts) => ({
     use: () => acc.use("work"), save: () => acc.saveCurrent("New"), start: () => acc.startAdd("New"), finish: () => acc.finishAdd("abcdefgh12"),
