@@ -1,6 +1,9 @@
 import { openSync, writeSync, fsyncSync, closeSync, renameSync, chmodSync, unlinkSync, writeFileSync, mkdirSync, constants } from "node:fs";
 import { dirname, join, basename } from "node:path";
 
+/** The rename, swappable so a test can make it fail the way a bind mount does. */
+export const io = { rename: renameSync };
+
 /**
  * Replaces a file all at once: temp in the SAME folder (rename across folders
  * is not atomic), 0600, fsync, rename. A reader sees the old file or the new
@@ -18,7 +21,7 @@ export function atomicWrite(path: string, data: string, mode = 0o600) {
   } finally { closeSync(fd); }
   chmodSync(tmp, mode); // the create mode is cut by the umask
   try {
-    renameSync(tmp, path);
+    io.rename(tmp, path);
   } catch (e) {
     try { unlinkSync(tmp); } catch { /* gone */ }
     if (!["EBUSY", "EXDEV", "EPERM"].includes((e as NodeJS.ErrnoException).code ?? "")) throw e;
