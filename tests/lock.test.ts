@@ -1,7 +1,7 @@
 import { describe, expect, test, afterAll } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
-import { withLock } from "../src/lock.ts";
+import { withLock, lockIsStale, timing } from "../src/lock.ts";
 import { scratch, cleanup } from "./helpers.ts";
 
 afterAll(cleanup);
@@ -49,10 +49,54 @@ describe("lock", () => {
     expect(await withLock(d, () => "got it", 2000)).toBe("got it");
   });
 
-  test("a lock held by a live pid is waited for, then refused", async () => {
+  test("a lock held by another live process is waited for, then refused", async () => {
     const d = scratch();
-    writeFileSync(join(d, "lock"), String(process.pid));
+    const mine = `${process.ppid}:other`; // the parent shell: alive, and not us
+    writeFileSync(join(d, "lock"), mine);
     await expect(withLock(d, () => "no", 150)).rejects.toThrow("still running");
-    expect(readFileSync(join(d, "lock"), "utf8")).toBe(String(process.pid));
+    expect(readFileSync(join(d, "lock"), "utf8")).toBe(mine);
+  });
+
+  // In a box the plugin is pid 2 every time, so a crashed run leaves a pid the next run also has. Measured: bwrap --unshare-all ... sh -c 'echo $$' prints 2.
+  test("a lock with our own pid but not our nonce is a leftover, taken at once", async () => {
+    const d = scratch();
+    writeFileSync(join(d, "lock"), `${process.pid}:left-by-the-last-run`);
+    expect(await withLock(d, () => "got it", 300)).toBe("got it");
+  });
+
+  test("a holder keeps its lock fresh, so a long job is never taken over", async () => {
+    const d = scratch();
+    const was = { ...timing };
+    Object.assign(timing, { staleMs: 200, beatMs: 40 });
+    try {
+      await withLock(d, async () => {
+        await sleep(600);
+        expect(lockIsStale(join(d, "lock"))).toBe(false);
+      });
+    } finally { Object.assign(timing, was); }
+  });
+
+  test("a lock nobody touches for the stale time is taken even if its pid is alive", async () => {
+    const d = scratch();
+    const f = join(d, "lock");
+    writeFileSync(f, `${process.ppid}:frozen`);
+    utimesSync(f, new Date(Date.now() - timing.staleMs - 5000), new Date(Date.now() - timing.staleMs - 5000));
+    expect(lockIsStale(f)).toBe(true);
+    expect(await withLock(d, () => "got it", 500)).toBe("got it");
+  });
+
+  test("release leaves a lock that someone else took after ours was reclaimed", async () => {
+    const d = scratch();
+    await withLock(d, () => { writeFileSync(join(d, "lock"), `${process.ppid}:theirs`); });
+    expect(readFileSync(join(d, "lock"), "utf8")).toBe(`${process.ppid}:theirs`);
+  });
+
+  test("the in-process queue waits for the holder instead of racing it for the file", async () => {
+    const d = scratch();
+    const first = withLock(d, () => sleep(300));
+    // Its own time to get the lock starts when its turn does: without the queue 100 ms is not enough and this rejects.
+    const second = withLock(d, () => "later", 100);
+    expect(await second).toBe("later");
+    await first;
   });
 });
