@@ -384,6 +384,23 @@ describe("Swapkin: detect and defer", () => {
     });
   }
 
+  test("the app says Swapkin is there while this process cannot see it (a box has no PATH entry for it): writers refuse, files stay", async () => {
+    const fake = fakeServer();
+    try {
+      const { h, acc } = await twoSaved(fake.env);
+      const before = treeHash(h.home, h.data);
+      acc.hostSaysDeferred = true;
+      expect(acc.deferred()).toBe(true);
+      for (const [name, op] of Object.entries(ops(acc))) await expect(op(), name).rejects.toThrow("Swapkin manages your Claude logins");
+      expect(await acc.probeAll()).toEqual([]);
+      expect((await acc.body()).deferTo).toBe("swapkin");
+      expect(treeHash(h.home, h.data)).toBe(before);
+      expect(fake.hits.length).toBe(0);
+      acc.hostSaysDeferred = false;
+      await acc.use("work"); // and it lets go again when the app stops saying so
+    } finally { fake.stop(); }
+  });
+
   test("Swapkin appears in the middle of a switch: the next write is blocked and the live login stays", async () => {
     const ctx = await twoSaved();
     const { h, store } = ctx;

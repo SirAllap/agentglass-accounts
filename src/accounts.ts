@@ -73,7 +73,9 @@ export class Accounts {
     return new Accounts(env, { ...o, store: o.store ?? (await SecretStore.open(env.AGENTGLASS_PLUGIN_DATA)) });
   }
 
-  deferred = () => swapkinPresent(this.env);
+  /** What the app reports. A boxed plugin has no PATH entry or folder to find Swapkin by, so the app's own look (same fact, outside the box) counts as much as ours. */
+  hostSaysDeferred = false;
+  deferred = () => this.hostSaysDeferred || swapkinPresent(this.env);
   /** Asked right before every write, not once at the top: Swapkin can be installed while a switch is running. */
   private guard() { if (this.deferred()) throw new Refused(DEFER_SENTENCE); }
 
