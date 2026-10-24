@@ -37,7 +37,7 @@ export function manageTree(v: View) {
       { type: "form", id: "save", fields: field("Name"), submit: { label: "Save current login", action: act("save") } }] });
     kids.push({ type: "section", title: "Add another account", subtitle: "Signs in to a throwaway folder; the login Claude Code is using is not touched.", children: [
       ...v.pending.flatMap((p) => [
-        { type: "text", text: `Waiting for ${p.label}. Run this in a terminal and sign in:` },
+        { type: "text", text: `Waiting for ${p.label}. Run this in a terminal, type /login at the prompt and sign in:` },
         { type: "code", text: p.command },
         { type: "row", children: [
           { type: "button", label: "I signed in, check", tone: "primary", action: act("check", { id: p.id }) },

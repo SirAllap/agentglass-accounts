@@ -356,7 +356,7 @@ export class Accounts {
   }
 
   /** The command to tell the person for an add in progress; the page shows it again after a redraw. */
-  addCommand(pendingId: string): string { return `CLAUDE_CONFIG_DIR='${this.pendingDir(pendingId)}' claude auth login`; }
+  addCommand(pendingId: string): string { return `CLAUDE_CONFIG_DIR='${this.pendingDir(pendingId)}' claude`; }
 
   /** Looks for the login the throwaway dir was given. `done:false` means "not yet". */
   async finishAdd(pendingId: string): Promise<{ done: boolean; id?: string }> {

@@ -273,13 +273,13 @@ describe("the manage page", () => {
     const t = await boot();
     await until(() => t.host.panels.length > 0);
     t.host.push({ type: "action", action: { id: "add" }, values: { label: "acme" } });
-    await until(() => texts(t.host.lastPanel()).includes("claude auth login"), 4000, "command on the panel");
+    await until(() => texts(t.host.lastPanel()).includes("/login"), 4000, "command on the panel");
     const pending = t.acc.pendingList()[0]!;
-    expect(texts(t.host.lastPanel())).toContain(`CLAUDE_CONFIG_DIR='${t.h.data}/pending/${pending.id}' claude auth login`);
+    expect(texts(t.host.lastPanel())).toContain(`CLAUDE_CONFIG_DIR='${t.h.data}/pending/${pending.id}' claude`);
     t.host.push({ type: "action", action: { id: "check", payload: { id: pending.id } } });
     await until(() => texts(t.host.lastPanel()).toLowerCase().includes("not signed in yet"), 4000, "not yet");
     t.host.push({ type: "action", action: { id: "cancel", payload: { id: pending.id } } });
-    await until(() => !texts(t.host.lastPanel()).includes("claude auth login"), 4000, "cleared");
+    await until(() => !texts(t.host.lastPanel()).includes("/login"), 4000, "cleared");
     expect(existsSync(`${t.h.data}/pending/${pending.id}`)).toBe(false);
     await t.stop();
   });

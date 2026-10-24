@@ -112,9 +112,9 @@ export async function run(env: Env, o: RunOptions = {}): Promise<void> {
         case "use": if (id !== null) await attempt(async () => { await acc.use(id); return "Switched."; }); break;
         case "remove": if (id !== null) await attempt(async () => { await acc.remove(id); return "Removed."; }); break;
         case "save": await attempt(async () => { await acc.saveCurrent(label ?? ""); return "Saved the login Claude Code has now."; }); break;
-        case "add": await attempt(async () => { await acc.startAdd(label ?? ""); return "Run the command below, sign in, then press check."; }); break;
+        case "add": await attempt(async () => { await acc.startAdd(label ?? ""); return "Run the command below, type /login, then press check."; }); break;
         case "cancel": if (id !== null) await attempt(async () => { await acc.cancelAdd(id); }); break;
-        case "check": if (id !== null) await attempt(async () => (await acc.finishAdd(id)).done ? "Added." : "Not signed in yet. Run the command and sign in, then check again."); break;
+        case "check": if (id !== null) await attempt(async () => (await acc.finishAdd(id)).done ? "Added." : "Not signed in yet. Run the command, type /login and sign in, then check again."); break;
         default: return;
       }
     } else return;

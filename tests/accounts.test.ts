@@ -412,7 +412,7 @@ describe("add, remove, edit", () => {
     const liveBefore = treeHash(h.home);
     const { pendingId, command } = await acc.startAdd("Home");
     const dir = join(h.data, "pending", pendingId);
-    expect(command).toBe(`CLAUDE_CONFIG_DIR='${dir}' claude auth login`);
+    expect(command).toBe(`CLAUDE_CONFIG_DIR='${dir}' claude`);
     expect(acc.addCommand(pendingId)).toBe(command);
     expect(() => acc.addCommand("../x")).toThrow(Refused);
     expect(statSync(dir).mode & 0o777).toBe(0o700);
