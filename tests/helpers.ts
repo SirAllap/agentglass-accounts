@@ -58,9 +58,9 @@ export function treeHash(...paths: string[]): string {
 }
 
 /**
- * The core's rules for an account list (shared/pluginAccounts.ts), copied so a
- * change there fails here instead of in a user's popover. Returns the first
- * problem or null.
+ * The core's rules for an account list (shared/pluginAccounts.ts), COPIED from
+ * agentglass e54399c5e. It is a copy: a change in the core does not fail here,
+ * so re-copy when that file changes. Returns the first problem or null.
  */
 const TOKEN_SHAPED = /\bsk-|\beyJ|[^\s@]+@[^\s@]+|[A-Za-z0-9+/=]{24,}/;
 const COLOURS = ["neutral", "blue", "violet", "green", "amber", "rose", "cyan", "teal"];
