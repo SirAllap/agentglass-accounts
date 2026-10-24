@@ -66,6 +66,15 @@ is refused and you are told to save it first. Probing (usage of the accounts you
 are not using) renews an expired token under the same lock and stores the new
 pair before it asks for usage.
 
+## The page
+
+Settings → Plugins → Accounts → Open, or "manage" in the usage popover. It
+lists the accounts with **Switch** and **Remove** (the one in use cannot be
+removed), **Save current login**, and **Add another account**, which prints the
+command for a throwaway folder and waits for you to say you signed in. Renaming
+and colours exist in the engine and are not on the page yet. Under Swapkin the
+page is read only.
+
 ## What it posts
 
 `POST /plugin/self/accounts` with id, label, plan, colour, active, storage and,
@@ -107,7 +116,9 @@ Given by the host: `PATH`, `HOME`, `AGENTGLASS_READ_TOKEN`, `AGENTGLASS_URL`,
   client id are written from memory of Claude Code and were only ever answered
   by a fake server on localhost. The usage endpoint and its response shape come
   from the app's own reader. Until someone checks the refresh against the real
-  service, a probe of an account you are not using may fail (it backs off and
+  service (and the `claude auth login` command printed for adding an account is
+  also unverified: the real `claude` was off limits), a probe of an account you
+  are not using may fail (it backs off and
   keeps the last reading); `ACCOUNTS_TOKEN_URL` overrides the URL.
 - The entrypoint starts `bun` from `/tmp`, not from the install folder: in the
   box `bun` must open the parents of its working directory and cannot
