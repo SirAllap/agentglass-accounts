@@ -13,6 +13,8 @@ export interface RunOptions {
   retryMs?: number;
   /** Failed polls in a row after which the run ends: a host that is gone must not leave this process polling for ever. */
   maxFailures?: number;
+  /** How often the app is asked again whether it sees Swapkin, even when nothing changed. */
+  verdictMs?: number;
   /** Delay before the first probe pass, then the period (jittered +-25%). */
   firstProbeMs?: number;
   probeMs?: number;
@@ -45,20 +47,38 @@ export async function run(env: Env, o: RunOptions = {}): Promise<void> {
   let chain: Promise<unknown> = Promise.resolve();
   const serial = <T>(fn: () => Promise<T>): Promise<T> => { const p = chain.then(fn, fn); chain = p.catch(() => {}); return p; };
 
-  /** Posts what changed since the last time. A list the host refused is tried again on the next pass. */
-  const publish = () => serial(async () => {
-    const body: Body = await acc.body();
-    const text = JSON.stringify(body);
-    if (text !== lastBody) {
-      const err = await host.postAccounts(body);
-      if (err === null) { lastBody = text; lastErr = ""; }
-      else if (err !== lastErr) { lastErr = err; log(`the app refused the list: ${err}`); }
+  let lastVerdict = 0;
+  /**
+   * Posts what changed since the last time (all of it when `force`). A list the
+   * host refused is tried again on the next pass. Every list carries
+   * `deferTo: "swapkin"`: the app drops it unless it finds Swapkin itself, and
+   * what it answers is read back, because inside a box this process has no way
+   * to find Swapkin and the app does.
+   */
+  const publish = (force = false): Promise<void> => serial(async () => {
+    for (let round = 0; round < 2; round++) {
+      const body: Body = { ...(await acc.body()), deferTo: "swapkin" };
+      const text = JSON.stringify(body);
+      let again = false;
+      if (force || text !== lastBody) {
+        const err = await host.postAccounts(body);
+        if (err === null) {
+          lastBody = text; lastErr = ""; lastVerdict = Date.now();
+          const verdict = await host.managedBy().catch((e) => { if (e instanceof Gone) throw e; return null; });
+          if (verdict !== null && (verdict === "swapkin") !== acc.hostSaysDeferred) { acc.hostSaysDeferred = verdict === "swapkin"; again = true; }
+        } else if (err !== lastErr) { lastErr = err; log(`the app refused the list: ${err}`); }
+      }
+      if (again) { force = true; continue; } // the list differs now (read-only, mirrored): say so
+      await draw(body);
+      return;
     }
-    const tree = manageTree({ accounts: body.accounts, deferred: body.deferTo === "swapkin", notice,
+  });
+  const draw = async (body: Body) => {
+    const tree = manageTree({ accounts: body.accounts, deferred: acc.deferred(), notice,
       pending: acc.pendingList().map((p) => ({ id: p.id, label: p.label, command: acc.addCommand(p.id) })) });
     const t = JSON.stringify(tree);
     if (t !== lastTree) { const err = await host.postPanel(PANEL, tree); if (err === null) lastTree = t; else log(`the app refused the page: ${err}`); }
-  });
+  };
 
   const say = (text: string, tone: Notice["tone"] = "success") => { notice = { text, tone }; };
   const attempt = async (fn: () => Promise<string | void>) => {
@@ -70,6 +90,8 @@ export async function run(env: Env, o: RunOptions = {}): Promise<void> {
   };
 
   const handle = async (ev: HostEvent) => {
+    // Asked again right before anything that writes: Swapkin can arrive between two polls.
+    if (ev.type === "account.switch" || ev.type === "action") await publish(true);
     if (ev.type === "account.switch") {
       const id = str(ev.id);
       if (ev.provider !== "anthropic" || id === null) return;
@@ -117,7 +139,7 @@ export async function run(env: Env, o: RunOptions = {}): Promise<void> {
         failures = 0;
         for (const ev of events) await handle(ev);
         // A login changed by Claude Code, a late Swapkin, a probe: no event says so, so each poll looks.
-        await publish();
+        await publish(Date.now() - lastVerdict > (o.verdictMs ?? 5 * 60_000));
       } catch (e) {
         if (e instanceof Gone) return;
         if (signal.aborted) return;

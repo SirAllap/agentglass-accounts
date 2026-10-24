@@ -2,7 +2,7 @@
   "name": "accounts",
   "publisher": "agentglass",
   "description": "Keeps your Claude logins side by side and switches between them from the usage popover. Touches Claude Code's login: it saves each account's tokens and replaces the live ones when you switch.",
-  "entrypoint": "bun run src/main.ts",
+  "entrypoint": "d=$PWD; cd /tmp && exec bun run \"$d/src/main.ts\"",
   "scope": "read",
   "sandbox": {
     "network": "internet",
@@ -15,7 +15,6 @@
       "~/.claude.json"
     ],
     "programs": [
-      "claude",
       "bun"
     ]
   },

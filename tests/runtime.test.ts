@@ -258,6 +258,60 @@ describe("Swapkin", () => {
   });
 });
 
+describe("Swapkin seen by the app only (a box cannot find it)", () => {
+  test("every list asks the app to verify Swapkin, and says nothing else new", async () => {
+    const t = await boot();
+    await until(() => t.host.accounts.length > 0);
+    expect(Object.keys(t.host.accounts[0]).sort()).toEqual(["accounts", "deferTo", "provider"]);
+    expect(t.host.accounts[0].deferTo).toBe("swapkin");
+    await t.stop();
+  });
+
+  test("the app already sees Swapkin at start: the list is read-only, nothing is written", async () => {
+    const h = makeHome(A);
+    const host = fakeHost();
+    const env = { ...h.env, AGENTGLASS_URL: host.url, AGENTGLASS_READ_TOKEN: host.token };
+    const acc = await Accounts.open(env, { store: await SecretStore.open(h.data, { keyring: null }) });
+    await acc.saveCurrent("work");
+    host.state.swapkin = true;
+    const ac = new AbortController();
+    const done = run(env, { acc, signal: ac.signal, waitMs: 30, retryMs: 10, firstProbeMs: 1e9, probeMs: 1e9 });
+    await until(() => host.panels.length > 1 || (host.panels.length > 0 && !nodes(host.lastPanel()).some((n) => n.type === "button")), 4000, "read-only page");
+    const before = treeHash(h.home, h.data);
+    host.push({ type: "action", action: { id: "save" }, values: { label: "orbit" } });
+    host.push({ type: "action", action: { id: "remove", payload: { id: "work" } } });
+    await Bun.sleep(200);
+    expect(treeHash(h.home, h.data)).toBe(before);
+    expect(nodes(host.lastPanel()).map((n) => n.type)).not.toContain("form");
+    ac.abort(); await done; host.stop();
+  });
+
+  test("Swapkin appears for the app mid-run: the next write re-asks first and is refused", async () => {
+    const t = await boot();
+    await until(() => t.host.accounts.length > 0);
+    const gets = t.host.state.gets;
+    t.host.state.swapkin = true; // nothing tells the plugin: only the app can see it
+    const before = treeHash(t.h.home, t.h.data);
+    t.host.push({ type: "account.switch", provider: "anthropic", id: "work" });
+    await until(() => texts(t.host.lastPanel()).includes("Swapkin manages"), 4000, "refusal");
+    expect(t.host.state.gets).toBeGreaterThan(gets);
+    expect(treeHash(t.h.home, t.h.data)).toBe(before);
+    await t.stop();
+  });
+
+  test("when the app stops seeing Swapkin the writers work again", async () => {
+    const t = await boot({ run: { verdictMs: 30 } });
+    await until(() => t.host.accounts.length > 0);
+    t.host.state.swapkin = true;
+    await until(() => !nodes(t.host.lastPanel()).some((n) => n.type === "button"), 4000, "read-only");
+    t.host.state.swapkin = false;
+    await until(() => nodes(t.host.lastPanel()).some((n) => n.type === "button"), 4000, "controls back");
+    t.host.push({ type: "account.switch", provider: "anthropic", id: "work" });
+    await until(() => live(t.h) === "fixture-ra", 4000, "switch works");
+    await t.stop();
+  });
+});
+
 describe("probe timer", () => {
   test("reads the saved account that is not in use and posts its windows; never the active one", async () => {
     const used: string[] = [];
