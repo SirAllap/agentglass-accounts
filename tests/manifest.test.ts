@@ -23,6 +23,6 @@ describe("the grants", () => {
   });
   test("the core commit the Swapkin defer depends on is named", () => {
     expect(readme).toContain("deferTo");
-    expect(readme).toContain("feat/accounts-plugin-core");
+    expect(readme).toContain("e54399c5e");
   });
 });

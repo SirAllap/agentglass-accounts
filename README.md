@@ -9,13 +9,22 @@ credentials into the outgoing account's own slot and then replaces the live
 credentials file and the account keys of `~/.claude.json` with the incoming
 account's. Read the grants below before enabling it.
 
+## Install
+
+```
+Settings → Plugins → Install → https://github.com/SirAllap/agentglass-accounts
+```
+
+Needs `bun`. It also needs an agentglass build that has the accounts
+contribution (see below). Then open the **Accounts** panel, add your logins and
+switch between them from the usage popover.
+
 ## It ships together with an agentglass change
 
-The plugin is meant to be released with the agentglass commit that adds
-`deferTo` to the accounts body (branch `feat/accounts-plugin-core`, commit
-`e54399c5e`). Without it the app drops `deferTo`, never says "managed by
-Swapkin" for a plugin that is not named `swapkin`, and a boxed copy of this
-plugin (which cannot see Swapkin by itself) would go on switching while Swapkin
+The plugin needs the agentglass commit that adds `deferTo` to the accounts body
+(commit `e54399c5e`, on agentglass `main`). On an app older than that commit,
+the app drops `deferTo`, never says "managed by Swapkin" for a plugin that is
+not named `swapkin`, and a boxed copy of this plugin (which cannot see Swapkin by itself) would go on switching while Swapkin
 owns the logins. Unboxed, it still looks for Swapkin itself and refuses; boxed
 on an app without the change, nothing can tell it, so do not enable it there.
 
@@ -214,17 +223,19 @@ Given by the host: `PATH`, `HOME`, `AGENTGLASS_READ_TOKEN`, `AGENTGLASS_URL`,
   whole payload and any value >= 1 means percent (606-623, 750); `resets_at`
   can be ISO or epoch seconds/milliseconds (626-644). The plugin follows all of
   that; `ACCOUNTS_USAGE_URL` overrides the URL for the fake server.
-- **Unverified against the real service, and not in that source either:** the
-  token refresh endpoint, the client id and the request and response bodies of
-  a refresh are written from memory of Claude Code and were only ever answered
-  by a fake server on localhost. The reader above never refreshes: it has no
-  token URL and no client id, and for an expired token it only says "Sign-in
-  expired" and asks to start Claude Code (lines 804-821). Swapkin's source does
-  not say either (its Claude adapter never refreshes a token and hands the
-  usage read to that same program, `omarchy-swapkin` `bin/providers/claude.sh`
-  lines 191-192). Until someone checks the refresh against the real service, a
-  probe of an account you are not using whose token has expired may fail (it
-  backs off and keeps the last reading); `ACCOUNTS_TOKEN_URL` overrides the URL.
+- **Verified from the published Claude Code package** (`@anthropic-ai/claude-code`
+  2.1.310, native build `@anthropic-ai/claude-code-linux-x64`, bundle read, not
+  run): a refresh is a JSON `POST` to `https://platform.claude.com/v1/oauth/token`
+  with `Content-Type: application/json` and the body `grant_type: "refresh_token"`,
+  `refresh_token`, `client_id` `9d1c250a-e61b-44d9-88ed-5944d1962f5e` and a
+  space-joined `scope`; the answer carries `access_token`, `refresh_token`
+  (kept when absent) and `expires_in` seconds. The plugin sends the same body,
+  with the scopes saved in the login. The reader above never refreshes, and
+  Swapkin's source does not either, so this is the only source for it.
+  **Not tried against the real service:** only a fake server on localhost has
+  answered it. If a probe of an account you are not using fails after its token
+  expired, it backs off and keeps the last reading; `ACCOUNTS_TOKEN_URL`
+  overrides the URL.
 - **Verified from Swapkin's source** (`omarchy-swapkin`, not run): the add flow
   starts plain `claude` with `CLAUDE_CONFIG_DIR` on a throwaway folder and the
   person types `/login` (`bin/providers/claude.sh` lines 145-160); a finished

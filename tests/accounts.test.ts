@@ -553,7 +553,7 @@ describe("probe", () => {
       setLive(h, B);
       await acc.saveCurrent("Home");
       expect(await acc.probeAll()).toEqual(["work"]);
-      expect(JSON.parse(fake.hits[0].body)).toMatchObject({ grant_type: "refresh_token", refresh_token: "fixture-ra" });
+      expect(JSON.parse(fake.hits[0].body)).toMatchObject({ grant_type: "refresh_token", refresh_token: "fixture-ra", client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e", scope: expect.any(String) });
       expect(fake.hits[1].auth).toBe("Bearer fixture-rot-access-1");
       expect(storedAtUsage).toContain("fixture-rot-refresh-1");
       expect((await slot(store, "work")).oauth.refreshToken).toBe("fixture-rot-refresh-1");

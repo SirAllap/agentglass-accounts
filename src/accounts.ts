@@ -16,9 +16,9 @@ const MAX_ACCOUNTS = 8;
 const COLOURS = ["blue", "violet", "green", "amber", "rose", "cyan", "teal", "neutral"];
 // Verified from source: omarchy-agent-usage-claude line 36 (URL) and 711-719 (headers).
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
-// shortcut: the refresh endpoint and client id are Claude Code's own and are in no source read so far (omarchy-agent-usage-claude never refreshes, 804-821) and were not checked against a live one; ACCOUNTS_TOKEN_URL overrides the URL, upgrade when measured.
-const TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
-const CLIENT_ID = "9d1c250a-e61b-47d5-a7d5-7a22f64df5b9";
+// Endpoint, client id and body are read from the published Claude Code 2.1.310 bundle (native build, not run); never called against the real service.
+const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
+const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const PENDING_TTL_MS = 30 * 60_000;
 const TIMELINE_MAX = 50;
 
@@ -478,9 +478,10 @@ export class Accounts {
   }
 
   private async renew(b: Bundle): Promise<Bundle | Fail> {
+    const scope = Array.isArray(b.oauth.scopes) ? b.oauth.scopes.filter((s) => typeof s === "string").join(" ") : "";
     try {
       const r = await fetch(this.tokenUrl(), { method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(8000),
-        body: JSON.stringify({ grant_type: "refresh_token", refresh_token: b.oauth.refreshToken, client_id: CLIENT_ID }) });
+        body: JSON.stringify({ grant_type: "refresh_token", refresh_token: b.oauth.refreshToken, client_id: CLIENT_ID, ...(scope ? { scope } : {}) }) });
       if (!r.ok) return { retryMs: retryAfter(r) };
       const j = (await r.json()) as Record<string, unknown>;
       if (typeof j.access_token !== "string") return { retryMs: 0 };
