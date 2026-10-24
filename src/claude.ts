@@ -6,9 +6,16 @@ import type { Env } from "./swapkin.ts";
 type Rec = Record<string, unknown>;
 const isRec = (v: unknown): v is Rec => !!v && typeof v === "object" && !Array.isArray(v);
 
+/**
+ * The `.claude.json` keys that belong to the account and not to the machine: the plan's model answers, its org defaults, its extra-usage state. The same 13 keys Swapkin carries with a login (`omarchy-swapkin` bin/providers/claude.sh:49).
+ */
+export const ACCOUNT_KEYS = ["oauthAccount", "userID", "modelAccessCache", "orgModelDefaultCache", "passesEligibilityCache", "additionalModelCostsCache", "additionalModelOptionsCache", "additionalModelOptionsAnsweredAt", "cachedExtraUsageDisabledReason", "cachedUsageUtilization", "groveConfigCache", "penguinModeOrgEnabled", "opusProMigrationComplete"] as const;
+
 /** Everything that makes a Claude Code login "this account": the token block and the account key. In memory or in a secret store only. */
 export interface Bundle {
   oauth: Rec; account: Rec | null;
+  /** The other 12 account keys of `.claude.json` that were present (`ACCOUNT_KEYS` minus `oauthAccount`). Absent in a slot saved before they were kept. */
+  keys?: Rec;
   /** The login this slot held before the last save, one step back and no further: a mis-filed token can be put back. */
   prev?: Bundle;
 }
@@ -31,8 +38,30 @@ function readObj(f: string): Rec | null {
 export function readLive(p: ClaudePaths): Bundle | null {
   const oauth = readObj(p.creds)?.claudeAiOauth;
   if (!isRec(oauth) || typeof oauth.refreshToken !== "string") return null;
-  const acct = readObj(p.json)?.oauthAccount;
-  return { oauth, account: isRec(acct) ? acct : null };
+  const state = readObj(p.json);
+  const keys = accountKeysOf(state ?? {}, OTHER_KEYS);
+  return { oauth, account: isRec(state?.oauthAccount) ? state.oauthAccount : null, ...(Object.keys(keys).length ? { keys } : {}) };
+}
+
+const OTHER_KEYS = ACCOUNT_KEYS.slice(1);
+/** Only the named account keys, whatever else the object holds (a slot is a file on disk and is not trusted to name keys). */
+const accountKeysOf = (o: Rec, names: readonly string[]): Rec => Object.fromEntries(names.filter((k) => Object.hasOwn(o, k)).map((k) => [k, o[k]]));
+
+/**
+ * `cur` with its account keys swapped for `inc`'s. A key the file has keeps its place (its value changes, or it goes when `inc` lacks it, so one account's org
+ * answers are never left beside another's); a key the file lacks is appended. Every other key is untouched and in order.
+ */
+function swapAccountKeys(cur: Rec, inc: Rec): Rec {
+  const own = new Set<string>(ACCOUNT_KEYS);
+  const out = Object.entries(cur).flatMap(([k, v]): [string, unknown][] => !own.has(k) ? [[k, v]] : Object.hasOwn(inc, k) ? [[k, inc[k]]] : []);
+  const has = new Set(out.map(([k]) => k));
+  return Object.fromEntries([...out, ...Object.entries(inc).filter(([k]) => !has.has(k))]);
+}
+
+/** Layout Claude Code gave the file (indent, trailing newline), so a switch does not reformat it. */
+function layout(text: string | null, o: Rec): string {
+  const indent = text === null ? 2 : /^\{\r?\n([ \t]+)"/.exec(text)?.[1] ?? (text.includes("\n") ? 2 : "");
+  return JSON.stringify(o, null, indent) + (text?.endsWith("\n") ? "\n" : "");
 }
 
 /** The live login moved between the caller's last look and the write: a refresh landed, so nothing was written. */
@@ -55,8 +84,8 @@ function copyLive(p: ClaudePaths, dir: string) {
 }
 
 /**
- * Makes `b` the live login. Only `claudeAiOauth` and `oauthAccount` change;
- * every other key in both files is kept as it was read. The files are written
+ * Makes `b` the live login. Only `claudeAiOauth` and the 13 account keys of
+ * `.claude.json` change; every other key in both files is kept as it was read. The files are written
  * where they stand (the box binds the two files, not their folder, so there
  * is no rename and no temp file), which a crash can cut short: so the content
  * they had is copied to `backupDir` first (and the new pair again once both are
@@ -70,12 +99,12 @@ export function writeLive(p: ClaudePaths, b: Bundle, o: WriteOpts) {
   const json = readObj(p.json) ?? {};
   if (o.expect && JSON.stringify(creds.claudeAiOauth) !== JSON.stringify(o.expect)) throw new LiveMoved("the Claude Code login changed");
   const nextCreds = { ...creds, claudeAiOauth: b.oauth };
-  const { oauthAccount: _old, ...rest } = json;
-  const nextJson = b.account ? { ...rest, oauthAccount: b.account } : rest;
+  const jsonText = existsSync(p.json) ? readFileSync(p.json, "utf8") : null;
+  const nextJson = swapAccountKeys(json, { ...(b.account ? { oauthAccount: b.account } : {}), ...accountKeysOf(b.keys ?? {}, OTHER_KEYS) });
   copyLive(p, o.backupDir);
   overwriteJsonInPlace(p.creds, JSON.stringify(nextCreds));
   try {
-    overwriteJsonInPlace(p.json, JSON.stringify(nextJson, null, 2));
+    overwriteJsonInPlace(p.json, layout(jsonText, nextJson));
   } catch (e) {
     if (credsText !== null) overwriteJsonInPlace(p.creds, credsText); else unlinkSync(p.creds);
     throw e;
@@ -140,5 +169,8 @@ export function parseBundle(text: string): Bundle {
   const j: unknown = JSON.parse(text);
   if (!isRec(j) || j.v !== 1 || !isRec(j.oauth)) throw new Error("stored login is not readable");
   const p = j.prev;
-  return { oauth: j.oauth, account: isRec(j.account) ? j.account : null, ...(isRec(p) && isRec(p.oauth) ? { prev: { oauth: p.oauth, account: isRec(p.account) ? p.account : null } } : {}) };
+  return { ...snap({ oauth: j.oauth, account: isRec(j.account) ? j.account : null, keys: isRec(j.keys) ? j.keys : undefined }), ...(isRec(p) && isRec(p.oauth) ? { prev: snap({ oauth: p.oauth, account: isRec(p.account) ? p.account : null, keys: isRec(p.keys) ? p.keys : undefined }) } : {}) };
 }
+
+/** A bundle without its `prev`: what a slot keeps for one login. */
+export const snap = (b: Bundle): Bundle => ({ oauth: b.oauth, account: b.account, ...(b.keys ? { keys: b.keys } : {}) });

@@ -3,7 +3,7 @@ import { join, resolve, sep } from "node:path";
 import { withLock } from "./lock.ts";
 import { SecretStore, StoreUnavailable, type Storage } from "./store.ts";
 import { atomicWrite } from "./fsutil.ts";
-import { claudePaths, readLive, writeLive, recoverLive, LiveMoved, sameLogin, sameToken, otherAccount, serialize, parseBundle, type Bundle, type ClaudePaths } from "./claude.ts";
+import { claudePaths, snap, readLive, writeLive, recoverLive, LiveMoved, sameLogin, sameToken, otherAccount, serialize, parseBundle, type Bundle, type ClaudePaths } from "./claude.ts";
 import { swapkinPresent, mirror, type Env } from "./swapkin.ts";
 
 /** An expected "no": its message is a sentence meant for the person, and never carries a token. */
@@ -182,7 +182,7 @@ export class Accounts {
   }
   private async put(meta: Meta, id: string, b: Bundle) {
     const old = await this.bundleOf(id);
-    const next: Bundle = old && !sameToken(old, b) ? { oauth: b.oauth, account: b.account, prev: { oauth: old.oauth, account: old.account } } : { oauth: b.oauth, account: b.account, ...(old?.prev ? { prev: old.prev } : {}) };
+    const next: Bundle = old && !sameToken(old, b) ? { ...snap(b), prev: snap(old) } : { ...snap(b), ...(old?.prev ? { prev: old.prev } : {}) };
     const kind = await this.store.set(id, serialize(next));
     const a = meta.accounts.find((x) => x.id === id);
     if (a) a.storage = kind;
@@ -484,7 +484,7 @@ export class Accounts {
       const j = (await r.json()) as Record<string, unknown>;
       if (typeof j.access_token !== "string") return { retryMs: 0 };
       const exp = typeof j.expires_in === "number" ? this.now() + j.expires_in * 1000 : this.now() + 3_600_000;
-      return { account: b.account, oauth: { ...b.oauth, accessToken: j.access_token, refreshToken: typeof j.refresh_token === "string" ? j.refresh_token : b.oauth.refreshToken, expiresAt: exp } };
+      return { ...snap(b), oauth: { ...b.oauth, accessToken: j.access_token, refreshToken: typeof j.refresh_token === "string" ? j.refresh_token : b.oauth.refreshToken, expiresAt: exp } };
     } catch { return { retryMs: 0 }; }
   }
 

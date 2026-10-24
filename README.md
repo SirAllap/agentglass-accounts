@@ -83,11 +83,38 @@ across processes):
 3. reads `.credentials.json` once more and, if its login is not the one it just
    saved (a refresh landed), refuses and writes nothing;
 4. copies both live files to the plugin's data folder (`0600`), notes the switch
-   as under way, replaces `claudeAiOauth` in `.credentials.json` and
-   `oauthAccount` in `~/.claude.json` **where they stand** (one write at offset
+   as under way, replaces `claudeAiOauth` in `.credentials.json` and the 13
+   account keys in `~/.claude.json` (next section) **where they stand** (one write at offset
    0, padded with spaces when shorter, which JSON ignores, then a cut to the
    real length and fsync, so a reader never meets an empty file), copies the
    new pair again and clears the note.
+
+**Which keys of `~/.claude.json` move with a login.** The same 13 Swapkin
+carries (verified from source: `omarchy-swapkin` `bin/providers/claude.sh:49`
+`ACCOUNT_KEYS`, and `:45-48` for why): `oauthAccount`, `userID`,
+`modelAccessCache`, `orgModelDefaultCache`, `passesEligibilityCache`,
+`additionalModelCostsCache`, `additionalModelOptionsCache`,
+`additionalModelOptionsAnsweredAt`, `cachedExtraUsageDisabledReason`,
+`cachedUsageUtilization`, `groveConfigCache`, `penguinModeOrgEnabled`,
+`opusProMigrationComplete`. They carry the plan (models allowed, org defaults,
+extra-usage state), so a Pro login would otherwise keep a Max login's answers
+until Claude Code asks again. On a switch the outgoing account's 13 keys (as
+they are in the file at that moment) go into its own slot, and the incoming
+account's replace them in the file. A key the incoming account has not got is
+**removed** from the file, not left: one account's org fields are never beside
+another's (Swapkin merges and would leave it; this is stricter). Every other
+key is left alone: same values, same order, same place. A key already in the
+file keeps its position; a key it did not have is added at the end. The file is
+written back with the indent it had (spaces, tabs or none) and a trailing
+newline only if it had one. What a JSON round trip cannot keep: number
+spellings (`1.0` becomes `1`), `\u` escapes (written as the character),
+a repeated key (the last wins), keys that are whole numbers (listed first by
+JavaScript), CRLF line ends, and integers beyond 2^53. Swapkin also drops six
+per-user experiment keys on a switch (`VOLATILE_KEYS`, `:52`); this plugin does
+not: it touches nothing outside the 13. A slot saved by an earlier version holds
+`oauthAccount` only, so switching to it clears the other 12 until Claude Code
+asks again. A slot is a file on disk and is not trusted to name keys: only the
+13 are ever written from it.
 
 Who the live login is: the **refresh token first**. A token that equals a saved
 slot's is that account, and if the account key beside it names someone else
@@ -138,7 +165,11 @@ Given by the host: `PATH`, `HOME`, `AGENTGLASS_READ_TOKEN`, `AGENTGLASS_URL`,
 ## Ceilings
 
 - **In-place writes are not atomic.** The box binds the two files and not their
-  folder, so there is no temp file and no rename. A crash or power cut between
+  folder, so there is no temp file and no rename (measured: a rename over a bound
+  file is refused with EBUSY, and a temp file next to it lands on the box's
+  scratch folder, not in `~/.claude`). Granting the folder would make the
+  write atomic and would also let the plugin write `settings.json` (hooks), so
+  it is not granted. A crash or power cut between
   the write and the end of it can leave a file torn; the copy in the data
   folder is what restores it. That copy is the pair as of the last switch (or
   the state just before one that died), not Claude Code's latest refresh: a
