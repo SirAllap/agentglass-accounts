@@ -7,11 +7,11 @@
   "sandbox": {
     "network": "internet",
     "read": [
-      "~/.claude",
+      "~/.claude/.credentials.json",
       "~/.claude.json"
     ],
     "write": [
-      "~/.claude",
+      "~/.claude/.credentials.json",
       "~/.claude.json"
     ],
     "programs": [

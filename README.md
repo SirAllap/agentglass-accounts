@@ -9,18 +9,38 @@ credentials into the outgoing account's own slot and then replaces the live
 credentials file and the account keys of `~/.claude.json` with the incoming
 account's. Read the grants below before enabling it.
 
+## It ships together with an agentglass change
+
+The plugin is meant to be released with the agentglass commit that adds
+`deferTo` to the accounts body (branch `feat/accounts-plugin-core`, commit
+`e54399c5e`). Without it the app drops `deferTo`, never says "managed by
+Swapkin" for a plugin that is not named `swapkin`, and a boxed copy of this
+plugin (which cannot see Swapkin by itself) would go on switching while Swapkin
+owns the logins. Unboxed, it still looks for Swapkin itself and refuses; boxed
+on an app without the change, nothing can tell it, so do not enable it there.
+
 ## What it asks for, and why
 
 | Grant | Why |
 | --- | --- |
 | `scope: read` | `/plugin/self/*` (post the account list, hear a chip press) is open at any scope. It reads and answers nothing else. |
 | `network: internet` | Checks the usage of accounts you are not using, and renews their tokens, against Anthropic. |
-| `read`/`write` `~/.claude` | The live `.credentials.json` is there. A switch rewrites it (temp file in the same folder, then rename). |
+| `read`/`write` `~/.claude/.credentials.json` | The live tokens. A switch rewrites the `claudeAiOauth` key and keeps the rest of the file. The grant is this one file, not `~/.claude`: that folder holds `settings.json` (its `hooks` run commands outside the box), `commands/` and `CLAUDE.md`, and a plugin that could write them could run code unboxed. |
 | `read`/`write` `~/.claude.json` | Holds `oauthAccount`, the other half of "who is logged in". Only that key is replaced; the rest of the file is kept. |
 | `programs: bun` | The plugin runs on `bun`. In the box, a `bun` that lives under your home folder (`~/.bun`, a version manager) is only visible through this grant; one under `/usr` needs none. `claude` is not granted: the plugin never runs it, it only prints the command for you to run. |
 
 No grant covers the whole home folder, `~/.config/agentglass`, or the keyring
 folders: the sandbox refuses those for every plugin.
+
+The validator flags the credentials file as a login in red; that is the plugin
+touching Claude Code's login, said out loud.
+
+A file grant is a bind mount of that file alone. The box cannot create a temp
+file next to it or rename over it (the rename is refused), so both files are
+written **in place**, and that is **not atomic**. See "How a switch stays safe"
+and "Ceilings". Both files must exist: the box cannot create a file it was not
+given, so on a machine where Claude Code never signed in, there is nothing to
+switch.
 
 ## Where the tokens live
 
@@ -43,9 +63,11 @@ not mounted; measured with a stub `swapkin` on the app's PATH, the plugin kept
 switching). So every list carries `deferTo: "swapkin"`, which the app drops
 unless it finds Swapkin itself, and the app's answer is read back from
 `GET /usage/accounts` after each post, before each press that writes, and every
-five minutes. Between two of those, Swapkin installed a moment ago is not
-known to either side: the press still reaches the plugin, which asks again and
-refuses. The mirror of Swapkin's own accounts (`swapkin providers --json`)
+five minutes. Only an explicit "nobody manages it" lets a write through: a list
+the app refused, a read-back that failed, or an app that lists nothing for this
+plugin counts as no answer and the press is refused with a sentence. Between
+two read-backs, Swapkin installed a moment ago is not known to either side: the
+press still reaches the plugin, which asks again and refuses. The mirror of Swapkin's own accounts (`swapkin providers --json`)
 only works unboxed; in the box the plugin shows its own list, read only.
 
 ## How a switch stays safe
@@ -58,13 +80,37 @@ across processes):
    else refresh token);
 2. saves that live login into **its own** slot, reads the live file again, and
    saves again if it moved meanwhile (a refresh that lands during the switch);
-3. only then replaces `claudeAiOauth` in `.credentials.json` and `oauthAccount`
-   in `~/.claude.json`, each by temp file in the same folder + fsync + rename.
+3. reads `.credentials.json` once more and, if its login is not the one it just
+   saved (a refresh landed), refuses and writes nothing;
+4. copies both live files to the plugin's data folder (`0600`), notes the switch
+   as under way, replaces `claudeAiOauth` in `.credentials.json` and
+   `oauthAccount` in `~/.claude.json` **where they stand** (one write at offset
+   0, padded with spaces when shorter, which JSON ignores, then a cut to the
+   real length and fsync, so a reader never meets an empty file), copies the
+   new pair again and clears the note.
+
+Who the live login is: the **refresh token first**. A token that equals a saved
+slot's is that account, and if the account key beside it names someone else
+(a crash between the two writes, or Claude Code rewriting `~/.claude.json` from
+memory) the switch, save and remove are refused ("different logins") and
+nothing is filed. A rotated token is matched by the account uuid and, when both
+sides say one, the organisation (a personal plan and a team seat share the
+uuid). Each slot keeps the login it replaced, one step back; the engine can put
+it back (`restorePrevious`), the page has no button for it yet.
+
+If agentglass or the machine dies mid-write, the next start (and the next
+switch) finds a file that is not JSON, or a login with no refresh token, waits
+150 ms in case Claude Code is the one writing, and restores it from the copy. A
+switch that died between its two writes is finished or dropped by the note it
+left. A file that cannot be read is never overwritten, and a probe skips every
+account while it cannot tell which one is in use.
 
 A live login that is none of the saved accounts is never overwritten: the switch
 is refused and you are told to save it first. Probing (usage of the accounts you
 are not using) renews an expired token under the same lock and stores the new
-pair before it asks for usage.
+pair before it asks for usage, and keeps it even if Swapkin shows up while the
+request is in flight (the old token is dead by then). Add flows nobody finished
+are swept after 30 minutes, at start and on every probe pass.
 
 ## The page
 
@@ -91,17 +137,27 @@ Given by the host: `PATH`, `HOME`, `AGENTGLASS_READ_TOKEN`, `AGENTGLASS_URL`,
 
 ## Ceilings
 
-- **The last millisecond.** The live file is read once more right before the
-  rename; a refresh that lands in that window is overwritten, and the account
-  would have to sign in again. Close Claude Code sessions you are not using.
-- **`~/.claude.json` is read, changed and replaced as a whole.** Claude Code
-  writes it too; a write of its own between our read and rename is lost.
-  In the box that file is a bind mount, so the rename is refused (EBUSY) and
-  it is overwritten **in place** instead (measured: same inode before and
-  after), which is not atomic: a crash in the middle can leave it half
-  written. `.credentials.json` sits in a granted folder and is renamed
-  atomically. The grant is the file, not its folder, because the app refuses
-  to mount the folder `~` itself.
+- **In-place writes are not atomic.** The box binds the two files and not their
+  folder, so there is no temp file and no rename. A crash or power cut between
+  the write and the end of it can leave a file torn; the copy in the data
+  folder is what restores it. That copy is the pair as of the last switch (or
+  the state just before one that died), not Claude Code's latest refresh: a
+  restore can bring back a token Claude Code has since rotated, and the account
+  would have to sign in again. The write also races Claude Code, which rewrites
+  `~/.claude.json` from memory: a write of its own between our read and our
+  write is lost. Close Claude Code sessions you are not using.
+- **A session still running as the old account.** If Claude Code, still open as
+  account A after a switch to B, refreshes, it writes A's rotated pair into the
+  credentials file while `~/.claude.json` says B. Offline that is
+  indistinguishable from B's own refresh (the token is new to every slot), so
+  the next switch files A's token into B's slot. Checking which account an
+  access token belongs to needs the profile endpoint, which was not verified
+  against the real service and is not called. The slot keeps the previous
+  login (`restorePrevious`) for exactly this.
+- **A login with no account key** (neither side has an account uuid) matches by
+  refresh token only, so one rotation later it is "not saved": remove that
+  account and save the login again. The sentence says so.
+- **Both files must exist** (see the grants).
 - **Secrets are in a file.** In the box there is no keyring (the app gives
   plugins none and the session bus is out of reach), so each account's tokens
   are a `0600` file in the plugin's data folder: anything running as you can
