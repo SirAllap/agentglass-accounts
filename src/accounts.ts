@@ -3,7 +3,7 @@ import { join, resolve, sep } from "node:path";
 import { withLock } from "./lock.ts";
 import { SecretStore, StoreUnavailable, type Storage } from "./store.ts";
 import { atomicWrite } from "./fsutil.ts";
-import { claudePaths, readLive, writeLive, sameLogin, serialize, parseBundle, type Bundle, type ClaudePaths } from "./claude.ts";
+import { claudePaths, readLive, writeLive, recoverLive, LiveMoved, sameLogin, serialize, parseBundle, type Bundle, type ClaudePaths } from "./claude.ts";
 import { swapkinPresent, mirror, type Env } from "./swapkin.ts";
 
 /** An expected "no": its message is a sentence meant for the person, and never carries a token. */
@@ -21,7 +21,7 @@ const TIMELINE_MAX = 50;
 
 export interface Window { label: string; minutes: number; usedPercent: number; resetsAt: string | null }
 interface MetaAccount { id: string; label: string; colour: string; plan: string; storage: Storage; reading?: { at: number; windows: Window[] }; nextProbeAt?: number; failures?: number }
-interface Meta { v: 1; accounts: MetaAccount[]; activeId: string | null; timeline: { at: string; from: string | null; to: string }[]; pending: { id: string; label: string; startedAt: number }[] }
+interface Meta { v: 1; accounts: MetaAccount[]; activeId: string | null; /** Set while a switch is writing the live files; still set at the next start means it died half way. */ switching?: { from: string | null; to: string }; timeline: { at: string; from: string | null; to: string }[]; pending: { id: string; label: string; startedAt: number }[] }
 
 export interface Body {
   provider: "anthropic";
@@ -32,7 +32,7 @@ export interface Body {
 /** Test seams: called at the points where a second writer could slip in. */
 export interface Hooks { afterSave?: (round: number) => void | Promise<void>; beforeWrite?: () => void | Promise<void> }
 
-export interface Options { store: SecretStore; hooks?: Hooks; now?: () => number }
+export interface Options { store: SecretStore; hooks?: Hooks; now?: () => number; /** How long a torn-looking live file gets to become whole before it is restored, ms. */ settleMs?: number }
 
 // What a token or an email looks like (the core refuses a list that shows one), kept here so a label is cleaned before it is posted, not refused after.
 const TOKEN_SHAPED = /\bsk-|\beyJ|[^\s@]+@[^\s@]+|[A-Za-z0-9+/=]{24,}/;
@@ -58,6 +58,8 @@ export class Accounts {
   private hooks: Hooks;
   private now: () => number;
   private store: SecretStore;
+  private settleMs: number;
+  private backupDir: string;
 
   constructor(private env: Env, o: Options) {
     if (!env.AGENTGLASS_PLUGIN_DATA) throw new Error("AGENTGLASS_PLUGIN_DATA is not set");
@@ -66,6 +68,8 @@ export class Accounts {
     this.store = o.store;
     this.hooks = o.hooks ?? {};
     this.now = o.now ?? Date.now;
+    this.settleMs = o.settleMs ?? 150;
+    this.backupDir = join(this.dir, "live-backup");
   }
 
   static async open(env: Env, o: Partial<Options> = {}): Promise<Accounts> {
@@ -92,6 +96,37 @@ export class Accounts {
   private saveMeta(m: Meta, own = false) { if (!own) this.guard(); atomicWrite(this.metaFile(), JSON.stringify(m, null, 2)); }
   private locked<T>(fn: () => Promise<T>) { return withLock(this.dir, fn); }
 
+  // ---- the live files ----
+  /** For a list or a probe: a file caught mid-write reads as "nobody", never as an error that stops the plugin. */
+  private liveOrNull(): Bundle | null { try { return readLive(this.paths); } catch { return null; } }
+  /** For anything that writes: a file that cannot be read is never overwritten. */
+  private liveForWrite(): Bundle | null {
+    try { return readLive(this.paths); } catch { throw new Refused("Claude Code's login file cannot be read right now, so nothing was changed. Try again in a moment."); }
+  }
+  /** A torn live file is restored from the copy the last switch made; a switch that died between its two writes is finished. Under the lock, before anything reads the live login. */
+  private async mend(meta: Meta): Promise<string[]> {
+    const said: string[] = [];
+    if ((await recoverLive(this.paths, this.backupDir, this.settleMs)).length) said.push("Restored Claude Code's login file from the copy made before the last switch.");
+    if (meta.switching) {
+      const inc = await this.bundleOf(meta.switching.to);
+      const cur = this.liveOrNull();
+      // Credentials are written first: if they already hold the incoming login and the account key does not, the second write never happened.
+      if (inc && cur && cur.oauth.refreshToken === inc.oauth.refreshToken && cur.account?.accountUuid !== inc.account?.accountUuid) {
+        this.guard();
+        writeLive(this.paths, inc, { backupDir: this.backupDir });
+        said.push("Finished a switch that was cut short.");
+      }
+      delete meta.switching;
+      this.saveMeta(meta, true);
+    }
+    return said;
+  }
+  /** Run at start: mend what a crash or a half-written file left. Says what it did, or null. */
+  async recover(): Promise<string | null> {
+    if (this.deferred()) return null;
+    return this.locked(async () => { const said = await this.mend(this.loadMeta()); return said.length ? said.join(" ") : null; });
+  }
+
   // ---- identity ----
   private async bundleOf(id: string): Promise<Bundle | null> {
     let t: string | null;
@@ -117,7 +152,7 @@ export class Accounts {
     if (this.deferred()) return this.deferredBody();
     const meta = this.loadMeta();
     // A keyring that does not answer cannot say which account is live: say none rather than guess.
-    const active = await this.identify(meta, readLive(this.paths)).catch((e) => { if (e instanceof Refused) return null; throw e; });
+    const active = await this.identify(meta, this.liveOrNull()).catch((e) => { if (e instanceof Refused) return null; throw e; });
     return { provider: "anthropic", accounts: meta.accounts.map((a, i) => ({
       id: a.id, label: safeText(a.label, 32) || `Account ${i + 1}`, plan: safeText(a.plan, 24), colour: COLOURS.includes(a.colour) ? a.colour : "neutral",
       active: a.id === active, storage: a.storage,
@@ -161,27 +196,40 @@ export class Accounts {
       if (!meta.accounts.some((a) => a.id === id)) throw new Refused("That account is not saved here.");
       const incoming = await this.bundleOf(id);
       if (!incoming) throw new Refused("The saved login for that account could not be read. Remove it and add it again.");
-      const live = readLive(this.paths);
+      await this.mend(meta);
+      const live = this.liveForWrite();
       const outId = await this.identify(meta, live);
       if (live && !outId) throw new Refused("The login Claude Code is using now is not one of your saved accounts, so switching would lose it. Save it as an account first.");
+      let saved: Bundle | null = live;
       if (live && outId) {
+        let s: Bundle = live;
         // Refresh tokens rotate: the outgoing login is written to ITS OWN slot before anything else, and again if it moved while we worked.
-        let saved = live, round = 0;
+        let round = 0;
         for (;;) {
           this.guard();
-          await this.put(meta, outId, saved);
+          await this.put(meta, outId, s);
           await this.hooks.afterSave?.(++round);
-          const now = readLive(this.paths);
-          if (!now || !sameLogin(now, saved)) throw new Refused("The Claude Code login changed while switching, so nothing was changed. Try again.");
-          if (JSON.stringify(now.oauth) === JSON.stringify(saved.oauth)) break;
+          const now = this.liveForWrite();
+          if (!now || !sameLogin(now, s)) throw new Refused("The Claude Code login changed while switching, so nothing was changed. Try again.");
+          if (JSON.stringify(now.oauth) === JSON.stringify(s.oauth)) break;
           if (round >= 5) throw new Refused("The Claude Code login kept changing while switching, so nothing was changed. Try again.");
-          saved = now;
+          s = now;
         }
+        saved = s;
       }
       await this.hooks.beforeWrite?.();
       if (outId === id) { meta.activeId = id; this.saveMeta(meta); return; }
       this.guard();
-      writeLive(this.paths, incoming);
+      // Still set at the next start means this switch died between its two writes.
+      meta.switching = { from: outId, to: id };
+      this.saveMeta(meta);
+      try {
+        writeLive(this.paths, incoming, { backupDir: this.backupDir, ...(saved ? { expect: saved.oauth } : {}) });
+      } catch (e) {
+        delete meta.switching; this.saveMeta(meta, true);
+        throw e instanceof LiveMoved ? new Refused("The Claude Code login changed while switching, so nothing was changed. Try again.") : e;
+      }
+      delete meta.switching;
       meta.timeline = [...meta.timeline, { at: new Date(this.now()).toISOString(), from: outId, to: id }].slice(-TIMELINE_MAX);
       meta.activeId = id;
       this.saveMeta(meta);
@@ -211,7 +259,7 @@ export class Accounts {
       this.guard();
       const meta = this.loadMeta();
       const label = this.labelFor(meta, raw);
-      const live = readLive(this.paths);
+      const live = this.liveForWrite();
       if (!live) throw new Refused("Claude Code is not signed in, so there is no login to save.");
       const same = await this.identify(meta, live);
       if (same) throw new Refused(`That login is already saved as "${meta.accounts.find((a) => a.id === same)!.label}".`);
@@ -266,7 +314,8 @@ export class Accounts {
       if (!p) throw new Refused("Unknown add in progress.");
       if (this.now() - p.startedAt > PENDING_TTL_MS) { this.dropPending(meta, p.id); this.saveMeta(meta); throw new Refused("That add took too long and was cancelled. Start again."); }
       const dir = this.pendingDir(pendingId);
-      const b = readLive({ creds: join(dir, ".credentials.json"), json: join(dir, ".claude.json") });
+      let b: Bundle | null;
+      try { b = readLive({ creds: join(dir, ".credentials.json"), json: join(dir, ".claude.json") }); } catch { b = null; } // claude is still writing it
       if (!b) return { done: false };
       const same = await this.identify(meta, b);
       if (same) { this.dropPending(meta, p.id); this.saveMeta(meta); throw new Refused(`That login is already saved as "${meta.accounts.find((a) => a.id === same)!.label}".`); }
@@ -290,7 +339,7 @@ export class Accounts {
       this.guard();
       const meta = this.loadMeta();
       if (!meta.accounts.some((a) => a.id === id)) throw new Refused("That account is not saved here.");
-      if (!opts.force && (await this.identify(meta, readLive(this.paths))) === id)
+      if (!opts.force && (await this.identify(meta, this.liveForWrite())) === id)
         throw new Refused("That is the account Claude Code is using now. Switch to another one first, or remove it anyway to keep only the live login.");
       this.guard();
       await this.store.delete(id);
@@ -336,7 +385,9 @@ export class Accounts {
       if (!a || (a.nextProbeAt ?? 0) > this.now()) return null;
       const b = await this.bundleOf(id);
       if (!b) return null;
-      const live = readLive(this.paths);
+      // A file that cannot be read cannot say which account is in use, and renewing the one that is would kill the live session's token: skip.
+      let live: Bundle | null;
+      try { live = readLive(this.paths); } catch { return null; }
       if (live && sameLogin(live, b)) return null; // the app measures the login in use
       const exp = typeof b.oauth.expiresAt === "number" ? b.oauth.expiresAt : 0;
       if (typeof b.oauth.accessToken === "string" && exp - this.now() > 60_000) return b.oauth.accessToken;

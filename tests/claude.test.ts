@@ -1,9 +1,9 @@
 import { describe, expect, test, afterAll } from "bun:test";
 import { statSync, lstatSync, readdirSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { claudePaths, readLive, writeLive, sameLogin, serialize, parseBundle } from "../src/claude.ts";
+import { claudePaths, readLive, writeLive, recoverLive, LiveMoved, sameLogin, serialize, parseBundle } from "../src/claude.ts";
 import { atomicWrite, overwriteJsonInPlace, io } from "../src/fsutil.ts";
-import { makeHome, setLive, readJson, cleanup, scratch } from "./helpers.ts";
+import { makeHome, setLive, readJson, cleanup, scratch, treeHash } from "./helpers.ts";
 
 afterAll(cleanup);
 const A = { access: "fixture-a", refresh: "fixture-ra", uuid: "uuid-a" };
@@ -30,7 +30,7 @@ describe("claude adapter", () => {
     const h = makeHome(A);
     const p = claudePaths(h.env);
     const b = { oauth: readLive(claudePaths(makeHome(B).env))!.oauth, account: { accountUuid: "uuid-b" } };
-    writeLive(p, b);
+    writeLive(p, b, { backupDir: scratch() });
     const c = readJson(h.credsFile), j = readJson(h.claudeJson);
     expect(c.claudeAiOauth.refreshToken).toBe("fixture-rb");
     expect(c.mcpOAuth).toEqual({ keep: "me" });
@@ -51,7 +51,7 @@ describe("claude adapter", () => {
     symlinkSync(target, h.claudeJson);
     const ino = [statSync(h.credsFile).ino, statSync(target).ino];
     const b = { oauth: readLive(claudePaths(makeHome(B).env))!.oauth, account: { accountUuid: "uuid-b" } };
-    writeLive(claudePaths(h.env), b);
+    writeLive(claudePaths(h.env), b, { backupDir: scratch() });
     expect([statSync(h.credsFile).ino, statSync(target).ino]).toEqual(ino);
     expect(lstatSync(h.claudeJson).isSymbolicLink()).toBe(true);
     expect(readJson(target).oauthAccount).toEqual({ accountUuid: "uuid-b" });
@@ -63,14 +63,14 @@ describe("claude adapter", () => {
     const p = { ...claudePaths(h.env), json: join(h.home, "no-such-dir-is-a-file", "x") };
     writeFileSync(join(h.home, "no-such-dir-is-a-file"), "x"); // a file where a folder is needed: mkdir fails
     const before = Buffer.from(require("node:fs").readFileSync(h.credsFile));
-    expect(() => writeLive(p, { oauth: { refreshToken: "r", accessToken: "t" }, account: null })).toThrow();
+    expect(() => writeLive(p, { oauth: { refreshToken: "r", accessToken: "t" }, account: null }, { backupDir: scratch() })).toThrow();
     expect(Buffer.from(require("node:fs").readFileSync(h.credsFile)).equals(before)).toBe(true);
   });
 
   test("a file Claude Code is half way through writing is never overwritten", () => {
     const h = makeHome(A);
     writeFileSync(h.claudeJson, '{"oauthAcc');
-    expect(() => writeLive(claudePaths(h.env), { oauth: { refreshToken: "r" }, account: null })).toThrow();
+    expect(() => writeLive(claudePaths(h.env), { oauth: { refreshToken: "r" }, account: null }, { backupDir: scratch() })).toThrow();
     expect(require("node:fs").readFileSync(h.claudeJson, "utf8")).toBe('{"oauthAcc');
   });
 
@@ -86,6 +86,87 @@ describe("claude adapter", () => {
     const b = { oauth: { refreshToken: "r" }, account: { accountUuid: "u" } };
     expect(parseBundle(serialize(b))).toEqual(b);
     expect(() => parseBundle('{"oauth":{}}')).toThrow();
+  });
+});
+
+const bundleB = () => ({ oauth: readLive(claudePaths(makeHome(B).env))!.oauth, account: { accountUuid: "uuid-b" } });
+
+describe("a copy to restore from, and a check before the write", () => {
+  test("the live content is copied to the backup folder (0600) before it is replaced", () => {
+    const h = makeHome(A);
+    const bk = join(scratch(), "bk");
+    const before = [readFileSync(h.credsFile, "utf8"), readFileSync(h.claudeJson, "utf8")];
+    writeLive(claudePaths(h.env), bundleB(), { backupDir: bk });
+    expect(readFileSync(join(bk, "credentials.json"), "utf8")).toBe(before[0]);
+    expect(readFileSync(join(bk, "claude.json"), "utf8")).toBe(before[1]);
+    expect(statSync(join(bk, "credentials.json")).mode & 0o777).toBe(0o600);
+    expect(statSync(bk).mode & 0o777).toBe(0o700);
+  });
+
+  // Measured as the gap the README admits: Claude Code refreshes between our last look and our write, and its rotated token was overwritten without a word.
+  test("a login that moved since the caller looked is not overwritten", () => {
+    const h = makeHome(A);
+    const bk = join(scratch(), "bk");
+    const seen = readLive(claudePaths(h.env))!.oauth;
+    setLive(h, { ...A, access: "fixture-a-r1", refresh: "fixture-ra-r1" });
+    const before = treeHash(h.home);
+    expect(() => writeLive(claudePaths(h.env), bundleB(), { backupDir: bk, expect: seen })).toThrow(LiveMoved);
+    expect(treeHash(h.home)).toBe(before);
+  });
+
+  test("a half-written credentials file is put back from the copy; a half-written .claude.json too", async () => {
+    const h = makeHome(A);
+    const bk = join(scratch(), "bk");
+    const p = claudePaths(h.env);
+    const good = [readFileSync(h.credsFile, "utf8"), readFileSync(h.claudeJson, "utf8")];
+    writeLive(p, bundleB(), { backupDir: bk });
+    writeFileSync(h.credsFile, '{"claudeAiOauth":{"accessTok');
+    writeFileSync(h.claudeJson, '{"oauthAcc');
+    expect((await recoverLive(p, bk, 0)).sort()).toEqual(["claude.json", "credentials.json"]);
+    expect([readFileSync(h.credsFile, "utf8"), readFileSync(h.claudeJson, "utf8")]).toEqual(good);
+  });
+
+  test("valid JSON whose login lost its refresh token counts as torn; signed out does not", async () => {
+    const h = makeHome(A);
+    const bk = join(scratch(), "bk");
+    const p = claudePaths(h.env);
+    writeLive(p, bundleB(), { backupDir: bk });
+    writeFileSync(h.credsFile, '{"claudeAiOauth":{"accessToken":"x"}}');
+    expect(await recoverLive(p, bk, 0)).toEqual(["credentials.json"]);
+    writeFileSync(h.credsFile, '{"mcpOAuth":{}}'); // Claude Code signed out: a whole file, not ours to touch
+    expect(await recoverLive(p, bk, 0)).toEqual([]);
+    expect(readFileSync(h.credsFile, "utf8")).toBe('{"mcpOAuth":{}}');
+  });
+
+  test("a healthy pair, no copy, a missing file and a torn copy are all left alone", async () => {
+    const h = makeHome(A);
+    const bk = join(scratch(), "bk");
+    const p = claudePaths(h.env);
+    const before = treeHash(h.home);
+    expect(await recoverLive(p, bk, 0)).toEqual([]); // healthy, no copy yet
+    expect(treeHash(h.home)).toBe(before);
+    writeFileSync(h.credsFile, '{"claudeAi'); // torn, and there is no copy to restore from
+    expect(await recoverLive(p, bk, 0)).toEqual([]);
+    expect(readFileSync(h.credsFile, "utf8")).toBe('{"claudeAi');
+    setLive(h, A);
+    writeLive(p, bundleB(), { backupDir: bk });
+    writeFileSync(join(bk, "credentials.json"), '{"torn copy');
+    writeFileSync(h.credsFile, '{"claudeAi');
+    expect(await recoverLive(p, bk, 0)).toEqual([]);
+    expect(readFileSync(h.credsFile, "utf8")).toBe('{"claudeAi');
+  });
+
+  // Claude Code's own write in progress looks the same for a moment; only a file still torn after the settle time is restored.
+  test("a file that is whole again after the settle time is not restored", async () => {
+    const h = makeHome(A);
+    const bk = join(scratch(), "bk");
+    const p = claudePaths(h.env);
+    writeLive(p, bundleB(), { backupDir: bk });
+    const whole = readFileSync(h.credsFile, "utf8");
+    writeFileSync(h.credsFile, '{"claudeAi');
+    setTimeout(() => writeFileSync(h.credsFile, whole.replace("fixture-rb", "fixture-rb-claude")), 30);
+    expect(await recoverLive(p, bk, 120)).toEqual([]);
+    expect(readJson(h.credsFile).claudeAiOauth.refreshToken).toBe("fixture-rb-claude");
   });
 });
 

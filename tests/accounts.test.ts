@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Accounts, Refused, type Hooks } from "../src/accounts.ts";
 import { SecretStore, type Keyring } from "../src/store.ts";
 import { parseBundle } from "../src/claude.ts";
+import { io } from "../src/fsutil.ts";
 import { makeHome, setLive, readJson, cleanup, treeHash, stub, coreProblem, type Home, type Login } from "./helpers.ts";
 import { fakeServer } from "./fakeServer.ts";
 
@@ -141,6 +142,96 @@ describe("use: RACE, a refresh lands while the switch runs", () => {
     const acc = new Accounts(ctx.env, { store, hooks: { afterSave: () => rotate(h, B, ++k) } });
     await expect(acc.use("work")).rejects.toThrow("kept changing");
     expect(live(h).startsWith("fixture-rb")).toBe(true);
+  });
+});
+
+describe("a switch cut short, and a file caught half written", () => {
+  const tear = (h: Home) => writeFileSync(h.credsFile, '{"claudeAiOauth":{"accessTok');
+  const setMeta = (h: Home, f: (m: any) => void) => { const file = join(h.data, "accounts.json"); const m = JSON.parse(readFileSync(file, "utf8")); f(m); writeFileSync(file, JSON.stringify(m)); };
+
+  test("a refresh that lands after the last check stops the write instead of being overwritten", async () => {
+    const ctx = await twoSaved();
+    const { h, store } = ctx;
+    const acc = new Accounts(ctx.env, { store, hooks: { beforeWrite: () => rotate(h, B, 5) } });
+    await expect(acc.use("work")).rejects.toThrow("changed while switching");
+    expect(live(h)).toBe("fixture-rb-r5"); // Claude Code's token is still there
+    await new Accounts(ctx.env, { store }).use("work"); // the next press saves it first
+    expect((await slot(store, "home")).oauth.refreshToken).toBe("fixture-rb-r5");
+  });
+
+  test("a torn credentials file is put back from the copy of the last switch, then the switch goes on", async () => {
+    const ctx = await twoSaved();
+    const { h } = ctx;
+    const acc = new Accounts(ctx.env, { store: ctx.store, settleMs: 0 });
+    await acc.use("work");
+    tear(h);
+    await acc.use("home");
+    expect(live(h)).toBe("fixture-rb");
+    expect(readJson(h.claudeJson).oauthAccount.accountUuid).toBe("uuid-b");
+  });
+
+  test("a torn file with nothing to restore from refuses and leaves it as it is", async () => {
+    const ctx = await twoSaved();
+    const { h } = ctx;
+    tear(h);
+    const acc = new Accounts(ctx.env, { store: ctx.store, settleMs: 0 });
+    await expect(acc.use("work")).rejects.toThrow("cannot be read");
+    expect(readFileSync(h.credsFile, "utf8")).toBe('{"claudeAiOauth":{"accessTok');
+  });
+
+  // The first publish was outside any catch: a file caught mid-write ended the plugin with exit 2.
+  test("the list still posts while the file is torn, with nobody in use", async () => {
+    const { h, acc } = await twoSaved();
+    tear(h);
+    const b = await acc.body();
+    expect(b.accounts.map((a) => a.active)).toEqual([false, false]);
+  });
+
+  // The live account is the one whose token must not be renewed from here: with the file unreadable it cannot be told apart from the others.
+  test("a torn live file stops the probe instead of renewing the account in use", async () => {
+    const fake = fakeServer();
+    try {
+      const h = makeHome({ ...B, expiresAt: Date.now() - 1000 });
+      const { acc } = await open(h, fake.env);
+      await acc.saveCurrent("home");
+      tear(h);
+      expect(await acc.probeAll()).toEqual([]);
+      expect(fake.hits.length).toBe(0);
+    } finally { fake.stop(); }
+  });
+
+  test("a switch that died between its two writes is finished at the next start", async () => {
+    const { h, acc } = await twoSaved();
+    // creds already hold work's login; .claude.json still says home: the crash
+    writeFileSync(h.credsFile, JSON.stringify({ claudeAiOauth: { accessToken: "fixture-a", refreshToken: "fixture-ra" }, mcpOAuth: { keep: "me" } }));
+    setMeta(h, (m) => { m.switching = { from: "home", to: "work" }; });
+    expect(await acc.recover()).toContain("Finished a switch");
+    expect(readJson(h.claudeJson).oauthAccount.accountUuid).toBe("uuid-a");
+    expect(JSON.parse(readFileSync(join(h.data, "accounts.json"), "utf8")).switching).toBeUndefined();
+  });
+
+  test("a switch that died before it wrote anything is left as it was", async () => {
+    const { h, acc } = await twoSaved();
+    setMeta(h, (m) => { m.switching = { from: "home", to: "work" }; });
+    const before = treeHash(h.home);
+    await acc.recover();
+    expect(treeHash(h.home)).toBe(before);
+    expect(JSON.parse(readFileSync(join(h.data, "accounts.json"), "utf8")).switching).toBeUndefined();
+  });
+
+  test("the marker is on disk while the live files are being written", async () => {
+    const { h, acc } = await twoSaved();
+    const seen: unknown[] = [];
+    const { fsync } = io;
+    io.fsync = (fd) => { seen.push(JSON.parse(readFileSync(join(h.data, "accounts.json"), "utf8")).switching ?? null); fsync(fd); };
+    try { await acc.use("work"); } finally { io.fsync = fsync; }
+    expect(seen).toContainEqual({ from: "home", to: "work" });
+  });
+
+  test("a switch leaves no marker behind", async () => {
+    const { h, acc } = await twoSaved();
+    await acc.use("work");
+    expect(JSON.parse(readFileSync(join(h.data, "accounts.json"), "utf8")).switching).toBeUndefined();
   });
 });
 
