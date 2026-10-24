@@ -14,8 +14,9 @@ export const UNCONFIRMED_SENTENCE = "The app has not confirmed that Swapkin is n
 export type Verdict = "unknown" | "none" | "swapkin";
 const MAX_ACCOUNTS = 8;
 const COLOURS = ["blue", "violet", "green", "amber", "rose", "cyan", "teal", "neutral"];
+// Verified from source: omarchy-agent-usage-claude line 36 (URL) and 711-719 (headers).
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
-// shortcut: the refresh endpoint and client id are Claude Code's own and were not checked against a live one; ACCOUNTS_TOKEN_URL overrides the URL, upgrade when measured.
+// shortcut: the refresh endpoint and client id are Claude Code's own and are in no source read so far (omarchy-agent-usage-claude never refreshes, 804-821) and were not checked against a live one; ACCOUNTS_TOKEN_URL overrides the URL, upgrade when measured.
 const TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
 const CLIENT_ID = "9d1c250a-e61b-47d5-a7d5-7a22f64df5b9";
 const PENDING_TTL_MS = 30 * 60_000;
@@ -490,7 +491,7 @@ export class Accounts {
 
   private async usage(token: string): Promise<Window[] | Fail> {
     try {
-      const r = await fetch(this.usageUrl(), { headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20", "User-Agent": "agentglass-accounts" }, signal: AbortSignal.timeout(8000) });
+      const r = await fetch(this.usageUrl(), { headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20", Accept: "application/json", "User-Agent": "agentglass-accounts" }, signal: AbortSignal.timeout(8000) });
       return r.ok ? windowsOf(await r.json()) : { retryMs: retryAfter(r) };
     } catch { return { retryMs: 0 }; }
   }
@@ -503,14 +504,37 @@ function retryAfter(r: Response): number {
   return r.status === 429 && Number.isFinite(s) && s > 0 ? s * 1000 : 0;
 }
 
-/** The usage endpoint's two metered windows. Scoped model limits are not mapped (a ceiling, not a bug). */
+/**
+ * The usage payload as `omarchy-agent-usage-claude` reads it (`probe_limits`, /usr/share/omarchy/bin, lines 742-765): the five hour bucket, the weekly one
+ * (`seven_day_oauth_apps`, else `seven_day`) and the model-scoped entries of `limits`. One payload speaks one scale: a value >= 1 anywhere makes it percent,
+ * else the values are fractions. Ceilings: an entry whose kind names no window, or whose model name is not plain text, is left out (the reader would show
+ * it untimed; a window here needs its length), and a long model name is cut so "<name> Weekly" fits the 16 characters a label may have.
+ */
 export function windowsOf(j: any): Window[] {
+  const bucket = (k: string) => { const b = j?.[k]; return b && typeof b === "object" && !Array.isArray(b) && Object.keys(b).length ? b : null; };
+  const num = (v: unknown) => { const s = String(v).trim().replace("%", "").trim(); return s === "" ? NaN : Number(s); };
+  const entries: any[] = Array.isArray(j?.limits) ? j.limits.filter((e: unknown) => e && typeof e === "object") : [];
+  const session = bucket("five_hour"), weekly = bucket("seven_day_oauth_apps") ?? bucket("seven_day");
+  const percentScale = [session?.utilization, weekly?.utilization, ...entries.map((e) => e.percent)].some((v) => num(v) >= 1);
+  const used = (v: unknown) => { const n = num(v); return n >= 0 ? Math.round(Math.min(1, percentScale || n > 1 ? n / 100 : n) * 100) : -1; };
+  const reset = (v: unknown) => {
+    const raw = String(v ?? "").trim();
+    const t = /^\d+$/.test(raw) ? Number(raw) * (Number(raw) < 1e12 ? 1000 : 1) : Date.parse(raw);
+    return raw === "" || Number.isNaN(t) ? null : new Date(t).toISOString();
+  };
   const out: Window[] = [];
-  for (const [key, label, minutes] of [["five_hour", "5h", 300], ["seven_day", "7d", 10080]] as const) {
-    const w = j?.[key];
-    if (!w || typeof w.utilization !== "number" || !Number.isFinite(w.utilization)) continue;
-    const t = typeof w.resets_at === "string" ? Date.parse(w.resets_at) : NaN;
-    out.push({ label, minutes, usedPercent: Math.min(100, Math.max(0, Math.round(w.utilization))), resetsAt: Number.isNaN(t) ? null : new Date(t).toISOString() });
+  for (const [b, label, minutes] of [[session, "5h", 300], [weekly, "7d", 10080]] as const) {
+    if (b && used(b.utilization) >= 0) out.push({ label, minutes, usedPercent: used(b.utilization), resetsAt: reset(b.resets_at) });
   }
-  return out;
+  const seen = new Set<string>();
+  for (const e of entries) {
+    const m = e.scope?.model;
+    const name = String(m?.display_name || m?.id || "").trim(), kind = String(e.kind ?? "").toLowerCase();
+    const [word, minutes] = kind.includes("month") ? ["Monthly", 43200] : /week|day/.test(kind) ? ["Weekly", 10080] : /hour|session/.test(kind) ? ["Session", 300] : ["", 0];
+    if (!m || !word || !/^[\w .()+-]+$/.test(name) || seen.has(`${name}\n${kind}`) || used(e.percent) < 0) continue;
+    seen.add(`${name}\n${kind}`);
+    const label = `${name.slice(0, 15 - word.length).trimEnd()} ${word}`;
+    if (!out.some((x) => x.label.toLowerCase() === label.toLowerCase())) out.push({ label, minutes, usedPercent: used(e.percent), resetsAt: reset(e.resets_at) });
+  }
+  return out.slice(0, 6);
 }

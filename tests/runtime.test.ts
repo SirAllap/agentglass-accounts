@@ -423,7 +423,7 @@ describe("probe timer", () => {
     const t = await boot({ extra: fake.env, run: { firstProbeMs: 20, probeMs: 1e9 } });
     await until(() => t.host.accounts.some((b) => b.accounts.find((a: any) => a.id === "work")?.reading), 4000, "reading posted");
     const body = t.host.last();
-    expect(body.accounts.find((a: any) => a.id === "work").reading.windows.map((w: any) => w.label)).toEqual(["5h", "7d"]);
+    expect(body.accounts.find((a: any) => a.id === "work").reading.windows.map((w: any) => w.label)).toEqual(["5h", "7d", "Orbit Pro Weekly"]);
     expect(body.accounts.find((a: any) => a.id === "home").reading).toBeUndefined();
     expect(used).toEqual(["fixture-a"]);
     await t.stop(); fake.stop();

@@ -151,7 +151,7 @@ page is read only.
 ## What it posts
 
 `POST /plugin/self/accounts` with id, label, plan, colour, active, storage and,
-for accounts you are not using, the last reading (5 hour and 7 day windows).
+for accounts you are not using, the last reading (up to six windows: 5 hour, weekly, model-scoped).
 Never an email, an account id from Anthropic, or a token. Names are cleaned the
 way the app's validator checks them, and a name that looks like an email or key
 is refused when you type it.
@@ -198,16 +198,33 @@ Given by the host: `PATH`, `HOME`, `AGENTGLASS_READ_TOKEN`, `AGENTGLASS_URL`,
   always writes it) or an unrotated refresh token.
 - A probe holds the lock while it renews a token (up to 8 s), so a switch can
   wait that long.
-- Only the 5 hour and 7 day windows are read, not per-model limits.
-- **Unverified against the real service:** the token refresh endpoint, the
-  client id and the request body are written from memory of Claude Code and
-  were only ever answered by a fake server on localhost. Swapkin's source does
-  not say either: its Claude adapter never refreshes a token itself and hands
-  the usage read to another program (`omarchy-swapkin` `bin/providers/claude.sh`
-  lines 191-192), which was not read. The usage endpoint and its response shape
-  come from the app's own reader. Until someone checks the refresh against the
-  real service, a probe of an account you are not using may fail (it backs off
-  and keeps the last reading); `ACCOUNTS_TOKEN_URL` overrides the URL.
+- Windows read: the 5 hour and weekly buckets and the model-scoped entries of
+  `limits` (at most six). An entry whose kind names no window length, or whose
+  model name is not plain text, is left out, and a long model name is cut so
+  "<name> Weekly" fits a 16 character label.
+- **Usage read, verified from source** at `/usr/share/omarchy/bin/omarchy-agent-usage-claude`
+  (a link to `/usr/bin/omarchy-agent-usage-claude`; read only, never run): `GET
+  https://api.anthropic.com/api/oauth/usage` (line 36), headers `Authorization:
+  Bearer <access token>`, `anthropic-beta: oauth-2025-04-20`, `Accept:
+  application/json` (lines 711-719); weekly is `seven_day_oauth_apps`, else
+  `seven_day` (742), session is `five_hour` (743); each bucket is
+  `{utilization, resets_at}` and `limits[]` entries are
+  `{kind, scope:{model:{display_name|id}}, percent, resets_at}` (677-708); a
+  value can be a number or text with a `%`, percent or fraction, one scale for the
+  whole payload and any value >= 1 means percent (606-623, 750); `resets_at`
+  can be ISO or epoch seconds/milliseconds (626-644). The plugin follows all of
+  that; `ACCOUNTS_USAGE_URL` overrides the URL for the fake server.
+- **Unverified against the real service, and not in that source either:** the
+  token refresh endpoint, the client id and the request and response bodies of
+  a refresh are written from memory of Claude Code and were only ever answered
+  by a fake server on localhost. The reader above never refreshes: it has no
+  token URL and no client id, and for an expired token it only says "Sign-in
+  expired" and asks to start Claude Code (lines 804-821). Swapkin's source does
+  not say either (its Claude adapter never refreshes a token and hands the
+  usage read to that same program, `omarchy-swapkin` `bin/providers/claude.sh`
+  lines 191-192). Until someone checks the refresh against the real service, a
+  probe of an account you are not using whose token has expired may fail (it
+  backs off and keeps the last reading); `ACCOUNTS_TOKEN_URL` overrides the URL.
 - **Verified from Swapkin's source** (`omarchy-swapkin`, not run): the add flow
   starts plain `claude` with `CLAUDE_CONFIG_DIR` on a throwaway folder and the
   person types `/login` (`bin/providers/claude.sh` lines 145-160); a finished

@@ -523,7 +523,7 @@ describe("the list passes the core's rules", () => {
 });
 
 describe("probe", () => {
-  test("only inactive accounts, usage mapped to two windows, the active login never asked for", async () => {
+  test("only inactive accounts, usage mapped to its windows, the active login never asked for", async () => {
     const fake = fakeServer();
     try {
       const { h, acc } = await twoSaved(fake.env);
@@ -533,8 +533,9 @@ describe("probe", () => {
       expect(fake.hits.some((x) => x.auth?.includes("fixture-b"))).toBe(false);
       const b = await acc.body();
       expect(b.accounts.find((a) => a.id === "work")!.reading).toEqual({ windows: [
-        { label: "5h", minutes: 300, usedPercent: 42, resetsAt: "2026-10-24T18:00:00.000Z" },
-        { label: "7d", minutes: 10080, usedPercent: 7, resetsAt: null }] });
+        { label: "5h", minutes: 300, usedPercent: 42, resetsAt: "2026-10-24T18:00:00.123Z" },
+        { label: "7d", minutes: 10080, usedPercent: 9, resetsAt: "2026-10-30T09:00:00.000Z" },
+        { label: "Orbit Pro Weekly", minutes: 10080, usedPercent: 55, resetsAt: "2026-10-30T09:00:00.000Z" }] });
       expect(b.accounts.find((a) => a.id === "home")!.reading).toBeUndefined();
       expect(treeHash(h.home)).toBe(before);
     } finally { fake.stop(); }
@@ -587,7 +588,7 @@ describe("probe", () => {
       t += 61 * 60_000;
       expect(await acc.probeAll()).toEqual([]);
       expect(fake.hits.length).toBe(n1 + 1);
-      expect((await acc.body()).accounts[0].reading?.windows.length).toBe(2); // last reading kept
+      expect((await acc.body()).accounts[0].reading?.windows.length).toBe(3); // last reading kept
       t += 9 * 60_000;
       await acc.probeAll();
       expect(fake.hits.length).toBe(n1 + 1); // inside the 10 minutes it asked for
